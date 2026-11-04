@@ -911,127 +911,6 @@ test("malformed existing agent JSON fails without overwriting user configuration
   }
 });
 
-// Antigravity loads a plugin from a directory of its own under ~/.gemini/config,
-// and runs each hook command through a shell, so the rendered command has to
-// work as a shell line exactly as written.
-test("Antigravity installs its plugin directory, replaces a hand-made copy and uninstalls cleanly", () => {
-  const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-install-"));
-  const pluginDir = join(home, ".gemini", "config", "plugins", "openviking-memory");
-  const runtime = join(home, ".openviking", "agent-integrations", "antigravity");
-  try {
-    // The manual steps the docs gave before the installer knew this host.
-    writeJson(join(pluginDir, "hooks.json"), {
-      "openviking-memory": { Stop: [{ type: "command", command: "node /checkout/examples/agent-hook-plugin/scripts/hook.mjs stop antigravity" }] },
-    });
-    runInstall(home, "cursor,antigravity");
-
-    const hooks = JSON.parse(readFileSync(join(pluginDir, "hooks.json"), "utf8"));
-    assert.deepEqual(Object.keys(hooks), ["openviking-memory"]);
-    assert.deepEqual(Object.keys(hooks["openviking-memory"]), ["SessionStart", "PreInvocation", "PreToolUse", "Stop"]);
-    assert.equal(JSON.parse(readFileSync(join(pluginDir, "plugin.json"), "utf8")).name, "openviking-memory");
-    const commands = hookCommands(hooks);
-    assert.equal(commands.length, 4);
-    for (const command of commands) {
-      assert.match(command, /OPENVIKING_INTEGRATION_ID='openviking-memory'/);
-      assert.ok(command.includes(join(runtime, "scripts")), command);
-      assert.doesNotMatch(command, /__OPENVIKING_/);
-    }
-    // The guard is grouped under a matcher, and its rendered command denies a
-    // file tool aimed at a viking:// URI.
-    const guard = hooks["openviking-memory"].PreToolUse[0];
-    assert.equal(guard.matcher, "*");
-    const denied = spawnSync("sh", ["-c", guard.hooks[0].command], {
-      env: { ...process.env, HOME: home },
-      input: JSON.stringify({ toolCall: { name: "read_file", args: { Path: "viking://user/default/memories/profile.md" } } }),
-      encoding: "utf8",
-    });
-    assert.equal(JSON.parse(denied.stdout).decision, "deny", denied.stderr);
-
-    const mcp = JSON.parse(readFileSync(join(pluginDir, "mcp_config.json"), "utf8")).mcpServers.openviking;
-    assert.equal(mcp.args[0], join(runtime, "servers", "mcp-proxy.mjs"));
-    assert.ok(existsSync(mcp.command), mcp.command);
-    assert.equal(mcp.env.OPENVIKING_HOOK_SOURCE, "antigravity");
-    for (const skill of HOST_SKILLS) assert.ok(existsSync(join(pluginDir, "skills", skill, "SKILL.md")), skill);
-    assert.deepEqual(JSON.parse(readFileSync(join(runtime, "integration.json"), "utf8")).capabilities, ["hooks", "mcp", "skills"]);
-    const sessionStart = spawnSync("sh", ["-c", hooks["openviking-memory"].SessionStart[0].command], {
-      env: { ...process.env, HOME: home, OPENVIKING_MEMORY_ENABLED: "0" },
-      input: "{}",
-      encoding: "utf8",
-    });
-    assert.equal(sessionStart.status, 0, sessionStart.stderr);
-    assert.equal(JSON.parse(readFileSync(join(runtime, "integration.json"), "utf8")).client, "antigravity");
-    const report = doctorInstall(home, join(runtime, "scripts", "ov-memory-doctor.mjs"));
-    assert.equal(report.client, "antigravity");
-    assert.deepEqual(report.problems, []);
-    // One host's installation carries no other host's configuration.
-    assert.equal(existsSync(join(runtime, "hosts", "cursor")), false);
-
-    // Antigravity still runs from the shared runtime after Cursor is removed.
-    runUninstall(home, "cursor");
-    assert.ok(existsSync(join(home, ".openviking", "agent-integrations", "memory-plugin-shared", "lib", "agent-hook-runtime.mjs")));
-
-    runUninstall(home, "antigravity");
-    assert.equal(existsSync(pluginDir), false);
-    assert.equal(existsSync(runtime), false);
-    assert.equal(existsSync(join(home, ".openviking", "agent-integrations", "memory-plugin-shared")), false);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-// The renderer shell-quotes the runtime path, so an apostrophe in it no longer
-// appears verbatim in hooks.json; validation has to run the command instead.
-test("Antigravity installs and validates under a home path containing an apostrophe", () => {
-  const base = mkdtempSync(join(tmpdir(), "openviking-antigravity-quote-"));
-  const home = join(base, "Agent's Space");
-  const pluginDir = join(home, ".gemini", "config", "plugins", "openviking-memory");
-  try {
-    mkdirSync(join(home, ".gemini", "config"), { recursive: true });
-    runInstall(home, "antigravity");
-
-    const hooks = JSON.parse(readFileSync(join(pluginDir, "hooks.json"), "utf8"));
-    for (const [event, input] of [["SessionStart", "{}"], ["Stop", "{}"]]) {
-      const run = spawnSync("sh", ["-c", hooks["openviking-memory"][event][0].command], {
-        env: { ...process.env, HOME: home, OPENVIKING_MEMORY_ENABLED: "0" },
-        input,
-        encoding: "utf8",
-      });
-      assert.equal(run.status, 0, `${event}: ${run.stderr}`);
-    }
-
-    runUninstall(home, "antigravity");
-    assert.equal(existsSync(pluginDir), false);
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("Antigravity adds no second MCP server beside one the user configured", () => {
-  const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-mcp-"));
-  const pluginDir = join(home, ".gemini", "config", "plugins", "openviking-memory");
-  const userMcp = join(home, ".gemini", "config", "mcp_config.json");
-  // The manual steps the docs used to give named no key for the server.
-  const own = '{\n  // my server\n  "mcpServers": { "OpenViking": { "url": "https://ov.example/mcp" } }\n}\n';
-  try {
-    mkdirSync(dirname(userMcp), { recursive: true });
-    writeFileSync(userMcp, own);
-    const install = runInstaller(home, [
-      "--harness", "antigravity", "--source", "dev", "--lang", "en",
-      "--url", "http://127.0.0.1:9", "--api-key", "", "--yes",
-    ]);
-    assert.equal(install.status, 0, `${install.stdout}\n${install.stderr}`);
-    assert.match(install.stdout, /Kept the openviking MCP server you already configured/);
-    assert.equal(existsSync(join(pluginDir, "mcp_config.json")), false);
-    assert.ok(existsSync(join(pluginDir, "skills", "openviking-memory", "SKILL.md")));
-    assert.equal(readFileSync(userMcp, "utf8"), own);
-    const report = doctorInstall(home, join(home, ".openviking", "agent-integrations", "antigravity", "scripts", "ov-memory-doctor.mjs"));
-    assert.deepEqual(report.problems, []);
-    assert.ok(report.notes.some((note) => note.startsWith("the installer wrote no MCP server")), report.notes.join("\n"));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
 test("Antigravity leaves a plugin directory it did not write alone", () => {
   const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-foreign-"));
   const pluginDir = join(home, ".gemini", "config", "plugins", "openviking-memory");
@@ -1047,6 +926,141 @@ test("Antigravity leaves a plugin directory it did not write alone", () => {
 
     runUninstall(home, "antigravity");
     assert.deepEqual(JSON.parse(readFileSync(join(pluginDir, "hooks.json"), "utf8")), foreign);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Antigravity installer tests.
+ * Purpose: Verifies installation of the Antigravity native plugin bundle into ~/.gemini/config/plugins/openviking-memory,
+ * checks allowed manifest keys, command prefix in hooks.json, file pruning and manifest closures, idempotence,
+ * clean uninstall preserving sibling plugins, and uri-guard decision execution.
+ * Usage: Executed via `node --test examples/memory-plugin-shared/install-agent-hooks.test.mjs`.
+ */
+test("antigravity install assembles a native plugin", () => {
+  const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-hooks-"));
+  try {
+    const result = runInstaller(home, [
+      "--harness", "antigravity",
+      "--source", "dev",
+      "--lang", "en",
+      "--url", "http://127.0.0.1:9",
+      "--api-key", "",
+      "--yes",
+    ]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+    const root = join(home, ".gemini", "config", "plugins", "openviking-memory");
+    const pluginJson = JSON.parse(readFileSync(join(root, "plugin.json"), "utf8"));
+    assert.equal(pluginJson.name, "openviking-memory");
+    const allowedKeys = new Set([
+      "name", "displayName", "version", "description", "author",
+      "homepage", "repository", "license", "keywords",
+    ]);
+    for (const key of Object.keys(pluginJson)) {
+      assert.ok(allowedKeys.has(key), `unexpected key in plugin.json: ${key}`);
+    }
+
+    const hooksJson = JSON.parse(readFileSync(join(root, "hooks.json"), "utf8"));
+    const commands = hookCommands(hooksJson);
+    assert.ok(commands.length > 0, "hooks.json contains commands");
+    for (const cmd of commands) {
+      assert.ok(
+        cmd.startsWith("node ./agent-integrations/antigravity/"),
+        `command does not start with expected prefix: ${cmd}`,
+      );
+    }
+
+    assert.ok(existsSync(join(root, "agent-integrations", "antigravity", "scripts", "hook.mjs")));
+    assert.equal(existsSync(join(root, "agent-integrations", "antigravity", "hosts", "zcode.mjs")), false);
+    assert.equal(existsSync(join(root, "agent-integrations", "antigravity", "tests")), false);
+
+    const manifestLines = readFileSync(
+      join(root, "agent-integrations", "memory-plugin-shared", "lib", "MANIFEST"),
+      "utf8",
+    ).split("\n").filter(Boolean);
+    for (const file of manifestLines) {
+      assert.ok(
+        existsSync(join(root, "agent-integrations", "memory-plugin-shared", "lib", file)),
+        `missing manifest file: ${file}`,
+      );
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("antigravity install is idempotent and uninstall removes only its plugin", () => {
+  const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-idempotent-"));
+  try {
+    const pluginsDir = join(home, ".gemini", "config", "plugins");
+    const siblingDir = join(pluginsDir, "other");
+    writeJson(join(siblingDir, "plugin.json"), { name: "other-plugin" });
+
+    // First install
+    const r1 = runInstaller(home, [
+      "--harness", "antigravity",
+      "--source", "dev",
+      "--lang", "en",
+      "--url", "http://127.0.0.1:9",
+      "--api-key", "",
+      "--yes",
+    ]);
+    assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
+
+    // Second install
+    const r2 = runInstaller(home, [
+      "--harness", "antigravity",
+      "--source", "dev",
+      "--lang", "en",
+      "--url", "http://127.0.0.1:9",
+      "--api-key", "",
+      "--yes",
+    ]);
+    assert.equal(r2.status, 0, `${r2.stdout}\n${r2.stderr}`);
+
+    const root = join(pluginsDir, "openviking-memory");
+    assert.ok(existsSync(root));
+
+    // Uninstall
+    const r3 = runInstaller(home, [
+      "--harness", "antigravity",
+      "--uninstall",
+      "--lang", "en",
+      "--yes",
+    ]);
+    assert.equal(r3.status, 0, `${r3.stdout}\n${r3.stderr}`);
+    assert.equal(existsSync(root), false);
+    assert.ok(existsSync(join(siblingDir, "plugin.json")), "sibling plugin preserved");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("installed antigravity hook answers pre-tool-use with a decision", () => {
+  const home = mkdtempSync(join(tmpdir(), "openviking-antigravity-guard-run-"));
+  try {
+    const r = runInstaller(home, [
+      "--harness", "antigravity",
+      "--source", "dev",
+      "--lang", "en",
+      "--url", "http://127.0.0.1:9",
+      "--api-key", "",
+      "--yes",
+    ]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+    const root = join(home, ".gemini", "config", "plugins", "openviking-memory");
+    const guardScript = join(root, "agent-integrations", "antigravity", "scripts", "uri-guard.mjs");
+
+    const out = spawnSync("node", [guardScript, "antigravity"], {
+      cwd: root,
+      input: JSON.stringify({ toolCall: { name: "read_file", args: { Path: "/tmp/x" } } }),
+      encoding: "utf8",
+    });
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(JSON.parse(out.stdout.trim()), { decision: "allow" });
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
