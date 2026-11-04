@@ -65,6 +65,7 @@ PAIRED=(
   "examples/agent-hook-plugin/plugin.json:examples/agent-hook-plugin/hosts/kimicode/kimi.plugin.json"
   "examples/agent-hook-plugin/plugin.json:examples/agent-hook-plugin/hosts/codebuddy/plugin.json"
   "examples/agent-hook-plugin/plugin.json:examples/agent-hook-plugin/hosts/qoder/plugin.json"
+  "examples/agent-hook-plugin/plugin.json:examples/agent-hook-plugin/hosts/antigravity/plugin.json"
 )
 
 failed=0
