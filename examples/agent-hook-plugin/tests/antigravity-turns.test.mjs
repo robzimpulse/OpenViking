@@ -144,9 +144,13 @@ test("background and MCP tool calls are captured", () => {
   assert.equal(turns.length, 2);
   const assistantTurn = turns[1];
   assert.equal(assistantTurn.role, "assistant");
-  assert.ok(assistantTurn.content.includes("[tool: call_mcp_tool]"), "contains call_mcp_tool");
+  assert.ok(assistantTurn.content.includes("[tool-call call_mcp_tool]"), "contains call_mcp_tool call");
   assert.ok(
-    assistantTurn.content.includes("Tool is running as a background task with task id 123"),
+    assistantTurn.content.includes("[tool-result call_mcp_tool] MCP search result text"),
+    "contains the MCP result output",
+  );
+  assert.ok(
+    assistantTurn.content.includes("[tool-result run_command] Tool is running as a background task with task id 123"),
     "contains RUNNING result text",
   );
 });
@@ -193,9 +197,20 @@ test("tool calls and results attach to the assistant turn", () => {
   assert.equal(turns.length, 2);
   const assistantTurn = turns[1];
   assert.equal(assistantTurn.role, "assistant");
-  assert.ok(assistantTurn.content.includes("[tool: run_command]"));
-  assert.ok(assistantTurn.content.includes("[tool: read_file]"));
-  assert.ok(assistantTurn.content.includes("done"));
+  const content = assistantTurn.content;
+  assert.ok(content.includes("[tool-call run_command]"));
+  assert.ok(content.includes("[tool-call read_file]"));
+  assert.ok(content.includes("[tool-result run_command] file1"), "completed output is captured");
+  assert.ok(content.includes("file2"), "completed output is captured in full");
+  assert.ok(
+    content.includes("[tool-result read_file] tool call denied by pre-tool hook: URI forbidden"),
+    "a denied call is captured with its error",
+  );
+  assert.ok(
+    content.indexOf("[tool-call run_command]") < content.indexOf("[tool-result run_command]")
+      && content.indexOf("[tool-result read_file]") < content.indexOf("done"),
+    "parts keep transcript order",
+  );
 });
 
 test("thinking is dropped", () => {
