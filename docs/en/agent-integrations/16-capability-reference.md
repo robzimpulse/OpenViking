@@ -36,7 +36,7 @@ Long-term memories are extracted from a session only after a **commit**. Capture
 | [Kimi Code](#kimi-code) | Kimi Code plugin with hooks and an MCP proxy | Server MCP tools |
 | [CodeBuddy Code](#codebuddy-code) | Plugin with hooks and an MCP proxy, installed by the unified installer | Server MCP tools |
 | [Qoder CLI](#qoder-cli) | Plugin with hooks and an MCP proxy, installed by the unified installer | Server MCP tools |
-| [Antigravity](#antigravity) | Plugin with hooks and an MCP proxy, installed by the unified installer | Server MCP tools |
+| [Google Antigravity](#google-antigravity) | Native plugin with hooks and an MCP proxy, installed by the unified installer | Server MCP tools |
 | [OpenCode](#opencode) | npm plugin that adds an MCP entry | Server MCP tools, named `openviking_<tool>` |
 | [DSH](#dsh) | In-process Cordis plugin plus an MCP proxy | Server MCP tools, named `mcp__openviking__<tool>` |
 | [pi](#pi) | Native extension with a built-in MCP client | Server MCP tools, registered as `openviking_<tool>` after the MCP handshake succeeds |
@@ -58,7 +58,7 @@ Long-term memories are extracted from a session only after a **commit**. Capture
 | Kimi Code | Yes, session-aware | Profile, memory index, skills, at the first prompt | Every 8 captured messages | Yes | Commits uncommitted messages |
 | CodeBuddy Code | Yes, session-aware, in the interactive TUI only | Profile, memory index, skills | Every 8 captured messages | Yes, in the interactive TUI only | Commits uncommitted messages |
 | Qoder CLI | Yes, session-aware | Profile, memory index, skills | Every 8 captured messages | Yes | Commits uncommitted messages |
-| Antigravity | Yes, session-aware, at the first model call of each turn | Profile, memory index, skills | Every turn | No exit hook; turns are already committed | No pre-compaction hook |
+| Google Antigravity | Yes, session-aware, once per turn (`invocationNum === 0`) | Profile, at session start | Every turn | No exit event; turns are already committed | No pre-compaction event |
 | OpenCode | Yes, session-aware | Profile, memory index, skills, indexed repositories | At 20,000 pending tokens, when idle | Yes, within the host's cleanup time | Commits around compaction |
 | DSH | Yes, session-aware | Profile, memory index, skills | At 20,000 pending tokens | Yes, with a 3-second budget | Commits, then the host summarizes |
 | pi | Yes, session-aware | Profile, memory index, skills, every turn | Takeover on: about 30,000 tokens; off: 20,000 | Takeover on: no; off: yes | Takeover replaces pi's summary |
@@ -225,7 +225,7 @@ The table shows the default path. Turning on [recall digests](#recall-digest) ch
 | Kimi Code | `UserPromptSubmit` | The prompt | Plain context text, not JSON |
 | CodeBuddy Code | `UserPromptSubmit`, interactive TUI only | The prompt | `<openviking-context>` in `additionalContext` |
 | Qoder CLI | `UserPromptSubmit`, interactive and headless | The prompt | `<openviking-context>` in `additionalContext` |
-| Antigravity | `PreInvocation` with `invocationNum` 0, once per user turn; later calls in a tool loop and reactive wakeups skip it | `lastUserInput`, with injected `<openviking-context>` blocks removed | A `systemMessage` step in `injectSteps`, which stays in the conversation |
+| Google Antigravity | `PreInvocation`, first step only (`invocationNum === 0`) | The prompt | `<openviking-context>` in ephemeral message |
 | OpenCode | v1: every `chat.message`; v2: every prompt | Text parts of the message | v1 prepends a synthetic part. v2 stores the result in message metadata and injects it before that message at each model step, without a new request |
 | DSH | `agent/pre-step` | Every message in the claimed batch, minus its own injected content | Appended as a user message |
 | pi | Queued at `before_agent_start`, run in the `context` event | The prompt | Prepended to the last real user message, so this turn's prompt gets this turn's memories |
@@ -259,10 +259,10 @@ When each integration injects it:
 | Claude Code | `SessionStart`, every source |
 | Codex | `SessionStart` on startup, clear, resume, and compact |
 | Cursor, TRAE, TRAE CN, ZCode | `SessionStart` |
-| Antigravity | `SessionStart`, and the first turn after each compaction checkpoint in the transcript |
 | Kimi Code | The first prompt; retried on later prompts until it succeeds |
 | CodeBuddy Code | `SessionStart`, every source; it can be delivered twice in one session, so the hook is idempotent. CodeBuddy drops `SessionStart` context at a compaction, so the next prompt sends it again |
 | Qoder CLI | `SessionStart`, every source (`startup`, `resume`, `compact`) |
+| Google Antigravity | `SessionStart`, systemMessage (`{ systemMessage: { systemMessage: "<text>" } }`); shows as a "System Message" row |
 | OpenCode | The first message of each session and the first after each compaction; not retried after a failure, and skipped for subagent sessions. The list of indexed repositories also goes into the system prompt |
 | DSH | At session start, and again on the next model step when a compaction dropped it |
 | pi | In the system prompt, rebuilt every turn |
@@ -294,7 +294,7 @@ The server stops query expansion after 5 seconds (`retrieval.recall_intent_timeo
 | pi | 15 seconds |
 | CodeBuddy Code | 17 seconds, inside a 60-second hook limit |
 | Qoder CLI | 17 seconds, inside a 60-second hook limit |
-| Antigravity | 17 seconds, inside a 20-second hook limit |
+| Google Antigravity | 17 seconds, inside host timeout |
 | OpenClaw | 15 seconds by default for the context search (`autoRecallTimeoutMs`), after a 500 ms health check |
 | Hermes | 4 seconds in total and 3 seconds per request; configurable |
 
@@ -365,7 +365,7 @@ Thresholds in this table are client-side. They read the server's pending-token c
 | Kimi Code | `Stop` after 8 captured messages since the last commit | `SessionEnd` and `Interrupt` commit everything not yet committed, including messages `Stop` already sent | `PreCompact` commits everything not yet committed |
 | CodeBuddy Code | `Stop` after 8 captured messages since the last commit | `SessionEnd` (interactive TUI only) commits everything not yet committed, including messages `Stop` already sent; `SessionStart` replays queued writes | `PreCompact` commits everything not yet committed |
 | Qoder CLI | `Stop` after 8 captured messages since the last commit | `SessionEnd` commits everything not yet committed, including messages `Stop` already sent; `SessionStart` replays queued writes | `PreCompact` commits everything not yet committed |
-| Antigravity | Every `Stop` that captured content; steps a missed `Stop` left behind are captured at the next `Stop` | None; `SessionStart` replays queued writes | No pre-compaction hook |
+| Google Antigravity | `Stop` after every turn (`commitTurnThreshold = 1`) in a detached worker | No `SessionEnd` event; `SessionStart` replays queued writes | No `PreCompact` event |
 | OpenCode | v1 `session.idle`, v2 end of execution: at 20,000 pending tokens | Session deletion, v1 `session.error`, v1 dispose, and v2 cleanup force a commit | v1 before and after compaction; v2 once after compaction ends |
 | DSH | `turn/end` at 20,000 pending tokens | Cordis teardown commits each session | `compaction/start` commits without the threshold check |
 | pi, takeover on (default) | Locally estimated 30,000 tokens with more than 3 user turns | `/viking commit` | `session_before_compact` |
@@ -391,7 +391,7 @@ Thresholds in this table are client-side. They read the server's pending-token c
 | Kimi Code | Commits | Conditional | Not verified | Not verified | No | `SessionEnd` and `Interrupt` commit everything not yet committed, including messages `Stop` already sent. `Interrupt` shares a 2-second request budget between capture and commit, so a slow capture leaves the commit to the next commit of the same session |
 | CodeBuddy Code | Conditional | No | No | No | No | `SessionEnd` fires only in the interactive TUI, where it commits everything not yet committed, including messages `Stop` already sent; a headless run relies on the threshold or `/compact`. The capture runs in a detached worker that the hook's own timeout does not reach |
 | Qoder CLI | Commits | Not verified | Not verified | Not verified | No | `SessionEnd` fires on `/exit` and at the end of a headless `-p` run, and commits everything not yet committed, including messages `Stop` already sent. The capture runs in a detached worker that the hook's own timeout does not reach |
-| Antigravity | No | No | No | No | No | No exit hook is registered. Every `Stop` that captured content already committed, so at most the turn in progress is left; its finished steps are captured at the next `Stop` of the same conversation |
+| Google Antigravity | No | No | No | No | No | Host has no `SessionEnd` event; each completed turn is committed at `Stop` |
 | OpenCode | Conditional | Conditional | Conditional | Conditional | No | v1 1.15.11+ `dispose` and v2 cleanup commit every session, but host cleanup time is limited, so slow requests or many sessions can be cut off. v2 cleanup also runs after 60 minutes idle and on plugin hot reload |
 | DSH | Commits | Commits | Commits | No | No | Teardown gives each session one 3-second commit, queued behind any slow write, inside a 5-second process grace period. A second Ctrl+C force-quits without it. Closing a browser tab in the web form does not tear down |
 | pi, takeover on | No | No | No | No | No | `session_shutdown` saves takeover state but does not commit. The next run that reaches the threshold, or `/viking commit` |
@@ -447,8 +447,8 @@ When the host shortens its context, most integrations make sure the dropped mess
 | Cursor | Host summarizes | `preCompact` commits | Nothing |
 | CodeBuddy Code | Host summarizes | `PreCompact` commits | The next prompt sends the profile again |
 | Qoder CLI | Host summarizes | `PreCompact` commits | Nothing |
+| Google Antigravity | Host summarizes | No pre-compaction event | Nothing |
 | TRAE, TRAE CN, ZCode | Host summarizes | No pre-compaction event | Nothing |
-| Antigravity | Host summarizes | No pre-compaction hook | The first turn after the compaction checkpoint sends the profile again |
 | Kimi Code | Host summarizes | `PreCompact` commits | Nothing |
 | OpenCode | Host summarizes | v1 flushes and commits; v2 captures the transcript | v1 commits again on `session.compacted`; v2 commits after `session.compaction.ended`. The next message sends the session-start context again |
 | DSH | Host summarizes | `compaction/start` commits regardless of the token threshold. Injected context is a user message and shrinks with the host's compaction | The next model step sends the profile again if the compaction dropped it |
@@ -503,7 +503,7 @@ Recall errors are handled so the host can continue without injected memories. Re
 | OpenCode | Recall, capture, and cleanup errors are caught and logged | Context-search marker; health checks are not cached | Recall awaits network requests; cleanup can also wait until its deadline |
 | CodeBuddy Code | Every hook catches the error and lets the host continue | Context-search marker; health is checked per hook | Recall waits for its own request before continuing |
 | Qoder CLI | Every hook catches the error and lets the host continue | Context-search marker; health is checked per hook | Recall waits for its own request before continuing |
-| Antigravity | Request errors are swallowed and nothing is injected. A hook that cannot get its lock within 5 seconds skips silently | Context-search marker only | Recall waits for its request, up to the 17-second budget, on the first model call of each turn |
+| Google Antigravity | Every hook catches the error and lets the host continue | Context-search marker; health is checked per hook | Recall waits for its own request before continuing |
 | DSH | The plugin swallows errors. Session setup failures are not cached, so each pre-step makes two 5-second health calls | Context-search marker; the user-space lookup is cached for the life of the process | Pre-step runs profile and recall in sequence, and session flush blocks |
 | pi | If the health check fails at start, no tools are registered and later prompts retry quietly. A failed MCP handshake alone does not stop recall, sync, or takeover; the status line shows `tools ✗` and `/viking` prints the error | Context-search marker. The MCP handshake is retried once per turn and can use its 5-second budget before recall starts | Recall waits for its request or deadline. `session_shutdown` waits up to 30 seconds without takeover, and a network error at `turn_end` waits 10 seconds per message |
 | OpenClaw | Recall is skipped if a 500 ms health check fails | None; one health check per turn | Only `memory_store` errors reach the model; `compact()` can wait up to 5 minutes |
@@ -533,7 +533,7 @@ The session ID prefix tells you which integration wrote a session on the server.
 | Kimi Code | Unified installer; managed Kimi Code plugin | `kc-<id>` | Shared settings, `plugin.kimicode` |
 | CodeBuddy Code | Unified installer, which registers a local marketplace | `cb-<id>` | Shared settings, `plugin.codebuddy` |
 | Qoder CLI | Unified installer, which registers a local marketplace | `qd-<id>` | Shared settings, `plugin.qoder` |
-| Antigravity | Unified installer (`--harness antigravity`); writes `~/.gemini/config/plugins/openviking-memory` | `ag-<conversation id>` | Shared settings, `plugin.antigravity` |
+| Google Antigravity | Unified installer, into `~/.gemini/config/plugins/openviking-memory` | `ag-<id>` | Shared settings, `plugin.antigravity` |
 | OpenCode | Unified installer, npm (`@openviking/opencode-plugin`), or source | `oc-<id>`; subagents `oc-<parent>__subagent-<child>` | Shared settings, `plugin.opencode` |
 | DSH | Unified installer, `dsh plugin add @openviking/dsh-memory-plugin`, or Desktop's Plugins page | `dsh-<id>` | Shared settings, `plugin.dsh`, then the Cordis patch |
 | pi | Unified installer, into pi's extension directory | `pi-<id>` | Shared settings, `plugin.pi` |
@@ -607,7 +607,7 @@ Settings that apply only to some integrations:
 | DSH | No | None | The same five as OpenCode, unless `mcpEnabled` is `false` | No |
 | CodeBuddy Code | No | None | Same five as Claude Code | No |
 | Qoder CLI | No | None | Same five as Claude Code | No |
-| Antigravity | No | None | Same five as Claude Code, each also invocable as `/<name>` | Installer menu |
+| Google Antigravity | No | None | Same five as Claude Code | No |
 | pi | Yes | `/viking`, `/viking commit` | The same five as OpenCode, unless `mcpEnabled` is `false` | Yes |
 | OpenClaw | No | `/add-resource`, `/add-skill`, `/ov-search`, `/ov-query-config`, `/ov-recall-trace` | Four plugin skills, including `openviking-rule-search` | Yes; checks the key's role and version compatibility |
 | Hermes (bundled) | No | None | None | Yes; `hermes memory status` lists environment overrides |
@@ -707,17 +707,17 @@ Each note covers what is specific to one integration. Shared behavior is in the 
 - MCP tools load lazily through `mcp_call`. In a headless run with the default permission mode, they need a permission rule or a permissive mode.
 - Subagent capture is not supported in v1: the host fires the events, but the shared dispatcher has no subagent stage yet.
 
-### Antigravity
+### Google Antigravity
 
-[Community integrations: Antigravity](./08-community-plugins.md#antigravity-memory-integration). A plugin with 4 hooks (`SessionStart`, `PreInvocation`, `PreToolUse`, `Stop`), an MCP proxy, and 5 skills, installed by the unified installer, and an `agent-hook-plugin` host adapter like ZCode. The Antigravity desktop app and the `agy` CLI load the same plugin from `~/.gemini/config/plugins/openviking-memory`.
+[Google Antigravity](./08-community-plugins.md#google-antigravity-memory-integration). A native plugin with 4 hooks, an MCP proxy, and 5 skills, installed by the unified installer into `~/.gemini/config/plugins/openviking-memory`, and an `agent-hook-plugin` host adapter.
 
-- `PreInvocation` runs before every model call, including each call in a tool loop (`invocationNum` above 0) and each reactive wakeup for a background task, subagent message, or `Stop` continuation. Recall runs only when `invocationNum` is 0 and no `MODEL` step has run since the latest `USER_INPUT` step in `transcriptPath`, so a turn injects once. A `lastUserInput` that differs from that step's request is a new turn the transcript has not recorded yet, and recalls too.
-- Antigravity hooks use their own `hooks.json` format, with each top-level key naming a hook. Context goes back as a `systemMessage` step in `injectSteps`, which stays in the conversation.
-- `Stop` carries no message text. Capture reads the finished steps of `transcriptPath` after the last captured step, preferring the untruncated `transcript_full.jsonl` beside it, in a detached worker, then commits. A step still in progress is read again by the next `Stop`; when a write is lost, the cursor stays so the next `Stop` resends it.
-- The plugin directory's `mcp_config.json` registers the OpenViking MCP server, the shared stdio proxy. When `~/.gemini/config/mcp_config.json` already defines a server named `openviking`, the installer keeps the user's server and does not write the plugin's `mcp_config.json`, so no tool appears twice.
-- The skills live in the plugin directory as `skills/<name>/SKILL.md`, and each is also invocable as `/<name>`.
-- `PreToolUse` (matcher `*`) runs the URI guard: a file tool whose location argument (an argument whose name ends in `Path`, `File`, or `Directory`) is a `viking://` URI is denied, and the reason reaches the model as a failed tool call pointing at the OpenViking MCP tools. Shell commands (`run_command`) are not checked and get no notice.
-- If `~/.gemini/config/plugins/openviking-memory` exists and OpenViking did not write it, the installer stops and `--uninstall` leaves it in place.
+- `SessionStart` injects the user profile as a persistent system message (`{ systemMessage: { systemMessage: "<text>" } }`), which shows as a "System Message" row in the Antigravity App transcript, and replays queued writes from previous sessions.
+- `PreInvocation` runs before each model step. It searches for relevant memories and injects an ephemeral message (`{ ephemeralMessage: "<text>" }`) once per turn when `invocationNum === 0`.
+- `PreToolUse` guards `viking://` virtual paths by denying them and pointing the agent at the OpenViking MCP tools. Other tool calls return `{ decision: "allow" }`.
+- `Stop` incrementally captures turns from `transcript.jsonl` and commits on every completed turn (`commitTurnThreshold = 1`) in a detached worker.
+- The host provides no `SessionEnd` or `PreCompact` hooks. A cancelled turn produces no `Stop` event and is captured with the subsequent turn.
+- MCP tools are routed via `call_mcp_tool` with `ServerName: "openviking-memory_openviking"`.
+- App restart is required after installation or uninstallation. Verified with the Google Antigravity App (macOS 2.28+). Standalone CLI (`agy`) and IDE extensions are unverified.
 
 ### OpenCode
 
