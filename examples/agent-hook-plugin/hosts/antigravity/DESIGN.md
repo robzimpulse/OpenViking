@@ -197,7 +197,11 @@ right before it, for a queued message — §4).
 - **`step_index` is not unique** (**verified**): after a retried message the file kept the
   old branch and appended a new one starting again at the retried step (`step_index` 4…13
   twice). Append-only file, so track capture progress by **line position**; a `step_index`
-  lower than the last captured one marks a new branch, not a duplicate.
+  lower than the last captured one marks a new branch, not a duplicate. The App's
+  **"Undo to this point" + re-send** behaves the same (**verified** twice): the old lines stay
+  and the re-sent branch is appended with the undone `step_index` values. It also **rewinds
+  `initialNumSteps`**, so the re-sent message's first `PreInvocation` repeats the undone turn's
+  `initialNumSteps`; never use it as a turn or event id.
 - No stable message id exists; dedupe by `(line position, step_index, created_at)`, never by
   text alone.
 
@@ -219,3 +223,24 @@ right before it, for a queued message — §4).
 Resolved in the second pass: ephemeral survival within a turn and across turns (§5),
 `systemMessage` shape and persistence (§5), deny `reason` visibility (§5), MCP startup, cwd,
 environment and tool namespace (§2), cancellation (§3), queued messages (§4).
+
+## 11. Acceptance (installed plugin)
+
+The `antigravity` bundle 0.5.30, installed by `install.sh --harness antigravity --source dev`
+from `feat/antigravity-host`, was exercised in Antigravity App 2.28.2 (`gemini-3.8-flash-high`,
+macOS darwin 25.4.0) against an OpenViking v0.5.2.1 server on 2026-11-04. One conversation,
+five turns plus two undo-and-resend rounds:
+
+| Check | Observation |
+| --- | --- |
+| Profile | `SessionStart` wrote a `SYSTEM_MESSAGE` (`SYSTEM_SDK`) holding `<openviking-context source="session-start">`; on turn 3, with tools forbidden, the model quoted it — persisted across turns |
+| Recall | One `EPHEMERAL_MESSAGE` per turn, none at `invocationNum` ≥ 1 (7-call tool loop on turn 5); on turn 3 only that turn's recall block was in context; turn 1's answer used recalled project memory |
+| URI guard | `read_file viking://~/memories` denied; the model quoted the reason, including "Use OpenViking MCP read instead" |
+| MCP | The model read the schemas under `~/.gemini/antigravity/mcp/openviking-memory_openviking/`, then `call_mcp_tool` `find`/`search` returned results |
+| Capture | All turns reached session `ag-<conversationId>`: user and assistant text plus `[tool-call …]`/`[tool-result …]` for `run_command`, `read_file` (including the deny error) and `call_mcp_tool`; no injected profile or recall block was re-captured |
+| Commit | One accepted commit per completed turn (7 in all); `capturedSinceCommit` back to 0 after each |
+| Undo + re-send | Only the appended branch was sent, once. The first round found the re-sent message without recall (prompt event id built from the rewound `initialNumSteps`; fixed in `6cfebc43b`); the second round had its `EPHEMERAL_MESSAGE` |
+| Host notice | The restart `SYSTEM_MESSAGE` (`SYSTEM`) was skipped |
+
+The hook log file was not written: debug logging is off by default, so the evidence is the
+transcript, the hook state file and the server session.
