@@ -1,8 +1,10 @@
 /**
  * Unit tests for the Antigravity transcript decoder (antigravity-turns.mjs).
  * Purpose: Verifies decoding of Antigravity transcript JSONL logs into normalized
- * user and assistant capture turns, stripping host metadata wrappers, preserving
- * tool calls and results, ignoring ephemeral/system messages, and tracking line-based cursors.
+ * user and assistant capture turns (one assistant turn per model step, each with
+ * structured text/tool `parts` in the server's vocabulary), stripping host metadata
+ * wrappers, preserving tool calls and results, ignoring ephemeral/system messages,
+ * and tracking line-based cursors.
  * Usage: Run with `node --test examples/agent-hook-plugin/tests/antigravity-turns.test.mjs`.
  */
 
@@ -30,7 +32,12 @@ test("user turn strips host blocks", () => {
   ];
   const turns = extractAntigravityTurns(records);
   assert.deepEqual(turns, [
-    { role: "user", content: "Reply with just OK.", turnId: "0" },
+    {
+      role: "user",
+      content: "Reply with just OK.",
+      parts: [{ type: "text", text: "Reply with just OK." }],
+      turnId: "0",
+    },
   ]);
 });
 
@@ -141,18 +148,50 @@ test("background and MCP tool calls are captured", () => {
     },
   ];
   const turns = extractAntigravityTurns(records);
-  assert.equal(turns.length, 2);
-  const assistantTurn = turns[1];
-  assert.equal(assistantTurn.role, "assistant");
-  assert.ok(assistantTurn.content.includes("[tool-call call_mcp_tool]"), "contains call_mcp_tool call");
+  assert.deepEqual(turns.map((t) => [t.role, t.turnId]), [["user", "0"], ["assistant", "1"], ["assistant", "3"]]);
+  assert.ok(turns[1].content.includes("[tool-call call_mcp_tool]"), "contains call_mcp_tool call");
   assert.ok(
-    assistantTurn.content.includes("[tool-result call_mcp_tool] MCP search result text"),
+    turns[1].content.includes("[tool-result call_mcp_tool] MCP search result text"),
     "contains the MCP result output",
   );
   assert.ok(
-    assistantTurn.content.includes("[tool-result run_command] Tool is running as a background task with task id 123"),
+    turns[2].content.includes("[tool-result run_command] Tool is running as a background task with task id 123"),
     "contains RUNNING result text",
   );
+  const backgroundResult = turns[2].parts.find((p) => p.type === "tool" && p.tool_output !== undefined);
+  assert.equal(backgroundResult.tool_status, "running", "a backgrounded tool stays running");
+  const mcpResult = turns[1].parts.find((p) => p.type === "tool" && p.tool_output !== undefined);
+  assert.equal(mcpResult.tool_status, "completed", "host statuses map to the server vocabulary");
+});
+
+test("each model step is one assistant turn with structured tool parts", () => {
+  const records = [
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "<USER_REQUEST>Go</USER_REQUEST>" },
+    {
+      step_index: 1,
+      source: "MODEL",
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      content: "Listing.",
+      tool_calls: [{ name: "run_command", args: { CommandLine: "ls" } }],
+    },
+    { step_index: 2, source: "MODEL", type: "GENERIC", status: "DONE", content: "a\nb" },
+    { step_index: 3, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content: "Done." },
+  ];
+  const turns = extractAntigravityTurns(records);
+  assert.deepEqual(turns.map((t) => [t.role, t.turnId]), [["user", "0"], ["assistant", "1"], ["assistant", "3"]]);
+  assert.deepEqual(turns[1].parts, [
+    { type: "text", text: "Listing." },
+    { type: "tool", tool_id: "1:0", tool_name: "run_command", tool_status: "running", tool_input: { CommandLine: "ls" } },
+    { type: "tool", tool_id: "1:0", tool_name: "run_command", tool_status: "completed", tool_output: "a\nb" },
+  ]);
+  assert.deepEqual(turns[2].parts, [{ type: "text", text: "Done." }]);
+  for (const turn of turns) {
+    assert.ok(
+      !turn.parts.some((p) => p.type === "text" && /\[tool-(call|result)/.test(p.text)),
+      "tool activity is never flattened into a text part",
+    );
+  }
 });
 
 test("tool calls and results attach to the assistant turn", () => {
@@ -194,9 +233,9 @@ test("tool calls and results attach to the assistant turn", () => {
     },
   ];
   const turns = extractAntigravityTurns(records);
-  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map((t) => [t.role, t.turnId]), [["user", "0"], ["assistant", "1"], ["assistant", "4"]]);
+  assert.equal(turns[2].content, "done", "the next model step is its own turn");
   const assistantTurn = turns[1];
-  assert.equal(assistantTurn.role, "assistant");
   const content = assistantTurn.content;
   assert.ok(content.includes("[tool-call run_command]"));
   assert.ok(content.includes("[tool-call read_file]"));
@@ -207,9 +246,16 @@ test("tool calls and results attach to the assistant turn", () => {
     "a denied call is captured with its error",
   );
   assert.ok(
-    content.indexOf("[tool-call run_command]") < content.indexOf("[tool-result run_command]")
-      && content.indexOf("[tool-result read_file]") < content.indexOf("done"),
+    content.indexOf("[tool-call run_command]") < content.indexOf("[tool-result run_command]"),
     "parts keep transcript order",
+  );
+  const results = assistantTurn.parts.filter((p) => p.type === "tool" && p.tool_output !== undefined);
+  assert.deepEqual(
+    results.map((p) => [p.tool_name, p.tool_status, p.tool_output]),
+    [
+      ["run_command", "completed", "file1\nfile2"],
+      ["read_file", "error", "tool call denied by pre-tool hook: URI forbidden"],
+    ],
   );
 });
 

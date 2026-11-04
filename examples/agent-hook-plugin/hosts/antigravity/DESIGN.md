@@ -204,6 +204,13 @@ right before it, for a queued message — §4).
   `initialNumSteps`; never use it as a turn or event id.
 - No stable message id exists; dedupe by `(line position, step_index, created_at)`, never by
   text alone.
+- **Capture shape.** One user turn is often a long autonomous run (one real conversation had
+  1 `USER_INPUT` and 681 `PLANNER_RESPONSE` steps in a 2 MB file). The adapter therefore sends
+  one assistant message per model step (`PLANNER_RESPONSE` plus the `GENERIC` results that
+  answer it) with structured `tool` parts. Record `status` maps to the server's `tool_status`
+  as follows: `RUNNING`→`running`, `ERROR`→`error`, anything else→`completed`. An earlier build
+  folded the whole run into one text message with inline `[tool-call …]`/`[tool-result …]`
+  lines, which the studio rendered as plain text and `captureMaxLength` cut at 24,000 chars.
 
 ## 9. Recovery and commit points
 
