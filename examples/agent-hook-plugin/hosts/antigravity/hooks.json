@@ -1,0 +1,8 @@
+{
+  "openviking-memory": {
+    "SessionStart": [{ "type": "command", "command": "node ./agent-integrations/antigravity/scripts/hook.mjs session-start antigravity", "timeout": 30 }],
+    "PreInvocation": [{ "type": "command", "command": "node ./agent-integrations/antigravity/scripts/hook.mjs pre-invocation antigravity", "timeout": 20 }],
+    "PreToolUse": [{ "matcher": "read_file", "hooks": [{ "type": "command", "command": "node ./agent-integrations/antigravity/scripts/uri-guard.mjs antigravity", "timeout": 5 }] }],
+    "Stop": [{ "type": "command", "command": "node ./agent-integrations/antigravity/scripts/hook.mjs stop antigravity", "timeout": 30 }]
+  }
+}
