@@ -37,17 +37,17 @@ export function envelope(event, block) {
 }
 
 /**
- * Normalize input payload fields to ensure stable session_id and turn-unique prompt_id.
+ * Normalize input payload fields: map Antigravity's conversationId to session_id.
+ * No prompt event id is set: Antigravity has no per-turn id, and one built from
+ * initialNumSteps repeats after "Undo to this point" + re-send, which made the dispatcher
+ * skip the re-sent message's recall as a duplicate. prompt() already limits recall to
+ * invocation 0, so the dispatcher's own same-prompt-within-500ms check is enough.
  */
 export function normalizeInput(input = {}) {
   const conversationId = input.conversationId || input.conversation_id;
-  const initialNumSteps = input.initialNumSteps ?? input.initial_num_steps ?? 0;
   const out = { ...input };
   if (!out.session_id && conversationId) {
     out.session_id = conversationId;
-  }
-  if (!out.prompt_id && conversationId != null) {
-    out.prompt_id = `${conversationId}:${initialNumSteps}`;
   }
   return out;
 }
