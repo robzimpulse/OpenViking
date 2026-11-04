@@ -1,215 +1,128 @@
 /**
- * Antigravity adapter (the Antigravity desktop app and the `agy` CLI share it).
+ * Antigravity thin host adapter.
  *
- * Antigravity calls PreInvocation before every model call, including each call
- * inside a tool loop (`invocationNum` > 0) and each reactive wakeup for a
- * background task, subagent message, or Stop continuation (`invocationNum` 0
- * with a higher `initialNumSteps`). Recall runs only when `invocationNum` is 0
- * and no `MODEL` step has run since the latest `USER_INPUT` step in
- * `transcriptPath`, keyed by that user step so a turn injects once. When the
- * new turn's user step is not in the transcript yet, `lastUserInput` differing
- * from the last recorded request marks it as a new turn. Injected
- * context goes back as a `systemMessage` step, which stays in the conversation.
- * Stop carries no message text: capture reads the finished steps of
- * `transcriptPath` after the last captured step.
+ * Key host facts shaping this adapter (see DESIGN.md):
+ * 1. PreToolUse: `{}` is treated by the host as a deny ("tool call denied by pre-tool hook").
+ *    Pass-through must always explicitly return `{"decision":"allow"}`.
+ * 2. Ephemeral messages: an `ephemeralMessage` survives across model invocations within a single turn,
+ *    but does not survive into later turns. Therefore recall is injected once per turn at `invocationNum === 0`.
+ *    A nested `systemMessage` at SessionStart persists across turns.
  *
- * PreToolUse hands over `toolCall.name` (`read_file`, `run_command`, …) and
- * `toolCall.args`, whose keys are PascalCase (`Path`, `CommandLine`).
+ * Purpose: Provides lifecycle stage mappings, input normalization, once-per-turn prompt recall,
+ * URI guard allow/deny decisions, and transcript capture + commit on Stop for Google Antigravity.
+ * Usage: Loaded by hook dispatcher (`hook.mjs`) and uri-guard (`uri-guard.mjs`) via HOSTS.antigravity.
  */
-
-import { existsSync, readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
 
 import { addAgentMessages, commitAgentSession } from "../../memory-plugin-shared/lib/agent-hook-runtime.mjs";
-import { filterCaptureTurns } from "../../memory-plugin-shared/lib/capture-utils.mjs";
 import { evaluateUriGuard } from "../../memory-plugin-shared/lib/uri-guard.mjs";
-
-// The host wraps a typed request as `<USER_REQUEST>…</USER_REQUEST>` followed by
-// metadata blocks. Only that record is unwrapped, and only an envelope that
-// opens the record, so text that merely quotes the tags is kept verbatim.
-const USER_REQUEST = /^<USER_REQUEST>\s*([\s\S]*)\s*<\/USER_REQUEST>/;
-const INJECTED = /<openviking-context\b[^>]*>[\s\S]*?<\/openviking-context>/g;
-const IN_PROGRESS_STATUSES = new Set(["PENDING", "QUEUED", "WAITING", "RUNNING", "GENERATING"]);
-
-export function cleanAntigravityText(text) {
-  return String(text || "").replace(INJECTED, "").trim();
-}
-
-function userRequestText(text) {
-  const raw = String(text || "");
-  return cleanAntigravityText(raw.match(USER_REQUEST)?.[1] ?? raw);
-}
-
-const sameText = (text) => userRequestText(text).replace(/\s+/g, " ");
+import {
+  applyIncrementalCaptureResult,
+  buildIncrementalCapturePlan,
+} from "./incremental-turn-capture.mjs";
+import { buildAntigravityTurns, cleanAntigravityText } from "./antigravity-turns.mjs";
 
 /**
- * The host may hand over `transcript.jsonl`, whose step contents are cut short;
- * the untruncated `transcript_full.jsonl` beside it is read instead when present.
+ * Build host response envelope for injected context.
+ * SessionStart injects nested systemMessage; PreInvocation injects ephemeralMessage.
  */
-export function antigravityTranscriptPath(transcriptPath) {
-  if (!transcriptPath) return "";
-  if (basename(transcriptPath) !== "transcript.jsonl") return transcriptPath;
-  const full = join(dirname(transcriptPath), "transcript_full.jsonl");
-  return existsSync(full) ? full : transcriptPath;
+export function envelope(event, block) {
+  if (!block) return {};
+  if (event === "session-start") {
+    return { injectSteps: [{ systemMessage: { systemMessage: block } }] };
+  }
+  if (event === "pre-invocation") {
+    return { injectSteps: [{ ephemeralMessage: block }] };
+  }
+  return {};
 }
 
 /**
- * Return `step_index + 1` of the unanswered `USER_INPUT` step before
- * `initialNumSteps`, `null` when a `MODEL` step has already run since the last
- * user step (a background-task, subagent, or Stop wakeup), or `undefined` when
- * the transcript has no parsed steps yet.
- *
- * With `lastUserInput`, a `null` becomes `undefined` when that input differs
- * from the last user step's text: the host has not written the new turn's
- * `USER_INPUT` step yet, so this is a new turn, not a wakeup.
+ * Normalize input payload fields to ensure stable session_id and turn-unique prompt_id.
  */
-export function resolveAntigravityTurnStep(jsonl, initialNumSteps, lastUserInput) {
-  const limit = Number.isInteger(initialNumSteps) && initialNumSteps > 0 ? initialNumSteps : Infinity;
-  let lastUserStep = -1;
-  let lastUserText = "";
-  let modelRanSinceUser = false;
-  let sawStep = false;
-  for (const line of String(jsonl || "").split("\n")) {
-    if (!line.trim()) continue;
-    let step;
-    try { step = JSON.parse(line); } catch { break; }
-    const index = Number(step.step_index);
-    if (!Number.isInteger(index)) continue;
-    if (index >= limit) break;
-    sawStep = true;
-    if (step.type === "USER_INPUT" && step.source === "USER_EXPLICIT") {
-      lastUserStep = index;
-      // A truncated record (transcript.jsonl keeps only the head and tail) can
-      // not be compared, so it never marks a new turn.
-      lastUserText = Array.isArray(step.truncated_fields) && step.truncated_fields.includes("content")
-        ? null
-        : sameText(step.content);
-      modelRanSinceUser = false;
-    } else if (lastUserStep >= 0 && step.source === "MODEL") {
-      modelRanSinceUser = true;
+export function normalizeInput(input = {}) {
+  const conversationId = input.conversationId || input.conversation_id;
+  const initialNumSteps = input.initialNumSteps ?? input.initial_num_steps ?? 0;
+  const out = { ...input };
+  if (!out.session_id && conversationId) {
+    out.session_id = conversationId;
+  }
+  if (!out.prompt_id && conversationId != null) {
+    out.prompt_id = `${conversationId}:${initialNumSteps}`;
+  }
+  return out;
+}
+
+/**
+ * Extract prompt text for recall.
+ * Returns empty string for invocationNum > 0 (ephemeral already visible in turn)
+ * or when lastUserInput is missing.
+ */
+export function prompt(input = {}) {
+  const invocationNum = input.invocationNum ?? input.invocation_num ?? 0;
+  if (Number(invocationNum) > 0) return "";
+  const raw = input.lastUserInput ?? input.last_user_input;
+  if (typeof raw !== "string" || !raw.trim()) return "";
+  return cleanAntigravityText(raw.trim());
+}
+
+/**
+ * PreToolUse URI guard for Antigravity.
+ * Denies read_file on viking:// URIs; always returns decision: "allow" when not denying (never {}).
+ */
+export function guard(input = {}) {
+  const call = input.toolCall || input.tool_call;
+  const name = call?.name || input.toolName || input.tool_name;
+  if (name === "read_file") {
+    const match = evaluateUriGuard("read", call?.args || call?.arguments || {});
+    if (match) {
+      return { decision: "deny", reason: match.reason };
     }
   }
-  if (!sawStep) return undefined;
-  if (lastUserStep < 0 || modelRanSinceUser) {
-    const pending = sameText(lastUserInput);
-    return pending && lastUserText !== null && pending !== lastUserText ? undefined : null;
-  }
-  return lastUserStep + 1;
+  return { decision: "allow" };
 }
 
 /**
- * The step index of the latest compaction. Antigravity has no compaction hook;
- * each compaction writes a `CHECKPOINT` step, and the context before it, the
- * session-start profile included, is gone.
+ * Capture conversation turns from transcript and commit after turn completion.
  */
-export function latestAntigravityCheckpoint(jsonl) {
-  let latest;
-  for (const line of String(jsonl || "").split("\n")) {
-    if (!line.includes('"CHECKPOINT"')) continue;
-    try {
-      const step = JSON.parse(line);
-      if (step.type === "CHECKPOINT" && step.source === "SYSTEM") latest = step.step_index;
-    } catch { /* a partial last line */ }
+export async function capture(ctx, state) {
+  const transcript = buildAntigravityTurns(ctx.input, state, ctx.cfg);
+  if (transcript.status !== "ok") {
+    ctx.log(`capture_${transcript.status}`, transcript.error ? { error: transcript.error } : {});
+    return null;
   }
-  return latest;
-}
+  const plan = buildIncrementalCapturePlan(transcript.turns, state, ctx.cfg);
+  if (plan.toSend.length === 0) return null;
 
-/** The user requests and text replies of finished steps after `afterStep`. */
-export function buildAntigravityTurns(jsonl, afterStep = -1) {
-  const turns = [];
-  let lastStep = afterStep;
-  for (const line of String(jsonl || "").split("\n")) {
-    if (!line.trim()) continue;
-    let step;
-    try { step = JSON.parse(line); } catch { break; }
-    const index = Number(step.step_index);
-    if (!(index > afterStep)) continue;
-    const isUser = step.type === "USER_INPUT" && step.source === "USER_EXPLICIT";
-    const isAssistant = step.type === "PLANNER_RESPONSE";
-    // Backgrounded commands (`GENERIC` with `RUNNING`) and failed tool steps
-    // stay non-DONE permanently and are never captured, so they must not stall
-    // the cursor.
-    if (!isUser && !isAssistant) {
-      lastStep = index;
-      continue;
+  const result = await addAgentMessages(ctx.fetchJSON, ctx.sessionId, plan.payloads, ctx.peerId);
+  const { captured, ...nextState } = applyIncrementalCaptureResult(state, plan, result, cleanAntigravityText);
+  let capturedSinceCommit = Number(state.capturedSinceCommit || 0) + captured;
+  if (captured > 0) {
+    const committed = await commitAgentSession(ctx.fetchJSON, ctx.sessionId, ctx.log);
+    if (committed.ok || committed.pendingQueued) {
+      capturedSinceCommit = 0;
     }
-    // An in-flight turn step is read again by the next Stop; terminal failures
-    // (CANCELED, ERROR, INVALID, …) will never become DONE and are skipped.
-    if (IN_PROGRESS_STATUSES.has(step.status)) break;
-    lastStep = index;
-    if (step.status && step.status !== "DONE") continue;
-    const turn = isUser
-      ? { role: "user", content: userRequestText(step.content) }
-      : { role: "assistant", content: cleanAntigravityText(step.content) };
-    if (turn.content) turns.push(turn);
   }
-  return { turns, lastStep };
+  return { ...nextState, capturedSinceCommit };
 }
-
-// File tools name their location in an argument ending in Path, File or
-// Directory (`Path`, `AbsolutePath`, `TargetFile`, `DirectoryPath`). A file body
-// or a command line that mentions a viking:// URI is not a location.
-const LOCATION_ARG = /(?:Path|File|Directory)$/;
-const GUARD_KINDS = [[/write/, "write"], [/replace|edit/, "edit"], [/grep|search/, "grep"], [/list|find/, "glob"]];
 
 export const antigravity = {
   prefix: "ag-",
+  tracksPendingPrompt: true,
   capturesOnlyWhenEnabled: true,
   detachesCapture: true,
-  requestBudgets: { "session-start": 25_000, "pre-invocation": 17_000, stop: 25_000 },
-  stages: { "session-start": "start", "pre-invocation": "prompt", stop: "capture" },
-  envelope(event, block) {
-    return block ? { injectSteps: [{ systemMessage: { systemMessage: block } }] } : {};
+  requestBudgets: {
+    "session-start": 25_000,
+    "pre-invocation": 17_000,
+    stop: 25_000,
   },
-  normalizeInput: (input) => ({
-    ...input,
-    session_id: input.conversationId,
-  }),
-  guard(input = {}) {
-    const { name = "", args } = input.toolCall || {};
-    const location = Object.entries(args || {}).find(([key, value]) => (
-      LOCATION_ARG.test(key) && typeof value === "string" && /^\s*viking:\/\//i.test(value)
-    ))?.[1];
-    if (!location) return {};
-    const kind = GUARD_KINDS.find(([pattern]) => pattern.test(name))?.[1] || "read";
-    const denied = evaluateUriGuard(kind, { path: location.trim() });
-    // No decision at all when the call may proceed: "allow" would skip the
-    // user's own permission prompt.
-    return denied ? { decision: "deny", reason: denied.reason } : {};
+  stages: {
+    "session-start": "start",
+    "pre-invocation": "prompt",
+    stop: "capture",
   },
-  prompt(input) {
-    if (Number(input.invocationNum || 0) !== 0) return "";
-    const text = cleanAntigravityText(input.lastUserInput);
-    if (!text) return "";
-    let turnStep;
-    if (input.transcriptPath) {
-      try {
-        const jsonl = readFileSync(antigravityTranscriptPath(input.transcriptPath), "utf8");
-        turnStep = resolveAntigravityTurnStep(jsonl, input.initialNumSteps, text);
-        input.latestCompaction = latestAntigravityCheckpoint(jsonl);
-      } catch {
-        turnStep = undefined;
-      }
-    }
-    if (turnStep === null) return "";
-    // Key by the user step rather than initialNumSteps, which advances on wakeups.
-    input.prompt_id = `${input.conversationId}:${turnStep ?? input.initialNumSteps}`;
-    return text;
-  },
-  async capture(ctx, state) {
-    const afterStep = Number.isInteger(state.lastStep) ? state.lastStep : -1;
-    const path = antigravityTranscriptPath(ctx.input.transcriptPath);
-    const jsonl = path ? await readFile(path, "utf8").catch(() => "") : "";
-    const { turns, lastStep } = buildAntigravityTurns(jsonl, afterStep);
-    const { kept, dropped } = filterCaptureTurns(turns, ctx.cfg);
-    for (const item of dropped) ctx.log("capture_skip", item);
-    const result = kept.length
-      ? await addAgentMessages(ctx.fetchJSON, ctx.sessionId, kept, ctx.peerId)
-      : { sent: 0, queued: 0 };
-    const captured = result.sent + result.queued;
-    if (captured > 0) await commitAgentSession(ctx.fetchJSON, ctx.sessionId, ctx.log);
-    // Keep the cursor when a write was lost, so the next Stop resends it.
-    return { ...state, lastStep: captured >= kept.length ? lastStep : afterStep };
-  },
+  envelope,
+  normalizeInput,
+  prompt,
+  guard,
+  capture,
 };
