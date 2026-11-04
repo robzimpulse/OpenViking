@@ -123,8 +123,8 @@ The Google Antigravity integration is an `agent-hook-plugin` host adapter. It re
 
 - **SessionStart** injects the user profile as a persistent system message (`{ systemMessage: { systemMessage: "<text>" } }`), which displays as a "System Message" row in the Antigravity App transcript, and replays queued writes from previous offline sessions.
 - **PreInvocation** recalls relevant memories once per turn (when `invocationNum === 0`) and injects them as an ephemeral message (`{ ephemeralMessage: "<text>" }`). Subsequent iterations of an agentic turn (`invocationNum > 0`) skip recall.
-- **PreToolUse** denies reading or writing a `viking://` URI as a local path and points the agent at the OpenViking MCP tools. All other tool calls are explicitly allowed (`{ decision: "allow" }`).
-- **Stop** incrementally captures new transcript turns from `transcript.jsonl` and commits the session on every turn (`commitTurnThreshold = 1`) in a detached worker.
+- **PreToolUse** (matcher `read_file`) denies reading a `viking://` URI as a local path (`{ decision: "deny", reason: "..." }`); the reason reaches the agent and points it at the OpenViking MCP tools. All other calls are explicitly allowed (`{ decision: "allow" }`).
+- **Stop** incrementally captures new turns from `transcript_full.jsonl` — user text, assistant text, and each tool call with its output or error — and, in a detached worker, commits the session after every Stop that captured something.
 
 The plugin manifest also exposes the OpenViking MCP server via `mcp_config.json` as a stdio proxy onto the same resolved configuration, callable through Antigravity's `call_mcp_tool` (with `ServerName: "openviking-memory_openviking"`), and ships the `openviking-memory` skill. Hooks and MCP read the same credentials, so they cannot disagree about the server, account, or user.
 

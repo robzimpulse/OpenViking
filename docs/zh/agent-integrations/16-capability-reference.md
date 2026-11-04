@@ -328,7 +328,7 @@ Claude Code 和 Codex 默认 `auto`，其他集成默认 `off`。支持服务端
 | ZCode | 每个 `Stop`；漏掉的 `Stop` 对应的轮次，在下一个 `Stop` 从 rollout 文件补齐 | 无 | 没有压缩前事件 |
 | Kimi Code | 距上次提交捕获满 8 条消息时，在 `Stop` 提交 | `SessionEnd` 和 `Interrupt` 提交所有尚未提交的消息，包括 `Stop` 已经发送的 | `PreCompact` 提交所有尚未提交的消息 |
 | CodeBuddy Code | 距上次提交捕获满 8 条消息时，在 `Stop` 提交 | `SessionEnd`（仅交互式 TUI）提交所有尚未提交的消息，包括 `Stop` 已经发送的；`SessionStart` 重放排队的写入 | `PreCompact` 提交所有尚未提交的消息 |
-| Google Antigravity | 每轮 `Stop` 后在分离的 worker 中提交（`commitTurnThreshold = 1`） | 没有 `SessionEnd` 事件；`SessionStart` 重放排队的写入 | 没有 `PreCompact` 事件 |
+| Google Antigravity | 每次捕获到内容的 `Stop` 之后在分离的 worker 中提交（不使用 `commitTurnThreshold`） | 没有 `SessionEnd` 事件；`SessionStart` 重放排队的写入 | 没有 `PreCompact` 事件 |
 | OpenCode | v1 `session.idle`、v2 执行结束时：待提交 token 达到 20,000 | 删除会话、v1 `session.error`、v1 dispose 和 v2 cleanup 强制提交 | v1 在压缩前后各一次；v2 在压缩结束后一次 |
 | DSH | `turn/end` 时待提交 token 达到 20,000 | Cordis teardown 提交每个会话 | `compaction/start` 提交，跳过阈值检查 |
 | pi，takeover 开（默认） | 本地估算达到 30,000 token，且用户轮多于 3 个 | `/viking commit` | `session_before_compact` |
@@ -658,7 +658,7 @@ Claude Code、Cursor、TRAE、ZCode、Kimi Code、DSH 和 pi 还会安装 **URI 
 - `SessionStart` 注入用户画像为持久系统消息（`{ systemMessage: { systemMessage: "<text>" } }`），在 Antigravity App 对话记录中显示为“System Message”行，并重放离线会话排队的写入。
 - `PreInvocation` 在每个模型 step 前运行，在每轮首次提问时（`invocationNum === 0`）检索相关记忆并注入临时消息（`{ ephemeralMessage: "<text>" }`）。
 - `PreToolUse` 拦截 `viking://` 虚拟路径并引导改用 OpenViking MCP 工具；其他工具调用返回 `{ decision: "allow" }`。
-- `Stop` 从 `transcript.jsonl` 增量捕获轮次，并在每轮完成后由后台 worker 提交会话（`commitTurnThreshold = 1`）。
+- `Stop` 从 `transcript_full.jsonl` 增量捕获轮次（包括每个工具调用及其输出或错误），并在每次捕获到内容的 `Stop` 之后由后台 worker 提交会话（不使用 `commitTurnThreshold`）。
 - 宿主不提供 `SessionEnd` 或 `PreCompact` hook。取消的回合不触发 `Stop`，并在后续回合补齐。
 - MCP 工具通过带有 `ServerName: "openviking-memory_openviking"` 的 `call_mcp_tool` 路由。
 - 安装或卸载后需要重启 Antigravity App。已在 Google Antigravity App（macOS 2.28+）验证；独立 CLI（`agy`）与 IDE 扩展未经实测。

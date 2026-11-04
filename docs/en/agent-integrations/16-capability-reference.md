@@ -329,7 +329,7 @@ Thresholds in this table are client-side. They read the server's pending-token c
 | ZCode | Every `Stop`; turns a missed `Stop` skipped are caught up from the rollout file at the next `Stop` | None | No pre-compaction event |
 | Kimi Code | `Stop` after 8 captured messages since the last commit | `SessionEnd` and `Interrupt` commit everything not yet committed, including messages `Stop` already sent | `PreCompact` commits everything not yet committed |
 | CodeBuddy Code | `Stop` after 8 captured messages since the last commit | `SessionEnd` (interactive TUI only) commits everything not yet committed, including messages `Stop` already sent; `SessionStart` replays queued writes | `PreCompact` commits everything not yet committed |
-| Google Antigravity | `Stop` after every turn (`commitTurnThreshold = 1`) in a detached worker | No `SessionEnd` event; `SessionStart` replays queued writes | No `PreCompact` event |
+| Google Antigravity | After every `Stop` that captured something, in a detached worker (`commitTurnThreshold` is not used) | No `SessionEnd` event; `SessionStart` replays queued writes | No `PreCompact` event |
 | OpenCode | v1 `session.idle`, v2 end of execution: at 20,000 pending tokens | Session deletion, v1 `session.error`, v1 dispose, and v2 cleanup force a commit | v1 before and after compaction; v2 once after compaction ends |
 | DSH | `turn/end` at 20,000 pending tokens | Cordis teardown commits each session | `compaction/start` commits without the threshold check |
 | pi, takeover on (default) | Locally estimated 30,000 tokens with more than 3 user turns | `/viking commit` | `session_before_compact` |
@@ -659,7 +659,7 @@ Each note covers what is specific to one integration. Shared behavior is in the 
 - `SessionStart` injects the user profile as a persistent system message (`{ systemMessage: { systemMessage: "<text>" } }`), which shows as a "System Message" row in the Antigravity App transcript, and replays queued writes from previous sessions.
 - `PreInvocation` runs before each model step. It searches for relevant memories and injects an ephemeral message (`{ ephemeralMessage: "<text>" }`) once per turn when `invocationNum === 0`.
 - `PreToolUse` guards `viking://` virtual paths by denying them and pointing the agent at the OpenViking MCP tools. Other tool calls return `{ decision: "allow" }`.
-- `Stop` incrementally captures turns from `transcript.jsonl` and commits on every completed turn (`commitTurnThreshold = 1`) in a detached worker.
+- `Stop` incrementally captures turns from `transcript_full.jsonl`, including each tool call with its output or error, and commits after every `Stop` that captured something, in a detached worker (`commitTurnThreshold` is not used).
 - The host provides no `SessionEnd` or `PreCompact` hooks. A cancelled turn produces no `Stop` event and is captured with the subsequent turn.
 - MCP tools are routed via `call_mcp_tool` with `ServerName: "openviking-memory_openviking"`.
 - App restart is required after installation or uninstallation. Verified with the Google Antigravity App (macOS 2.28+). Standalone CLI (`agy`) and IDE extensions are unverified.

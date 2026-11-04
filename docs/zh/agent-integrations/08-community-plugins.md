@@ -120,8 +120,8 @@ Google Antigravity 集成是 `agent-hook-plugin` 的宿主适配器：复用共�
 
 - **SessionStart** 注入用户画像为持久化系统消息（`{ systemMessage: { systemMessage: "<text>" } }`），在 Antigravity App 的对话记录中显示为“System Message”行；同时重放离线会话排队的写入。
 - **PreInvocation** 在每轮 prompt 开始时（`invocationNum === 0`）召回相关记忆，以临时消息（`{ ephemeralMessage: "<text>" }`）注入上下文。同一回合后续的循环步骤（`invocationNum > 0`）跳过召回。
-- **PreToolUse** 拦截本地文件工具对 `viking://` 虚拟路径的访问，返回拒绝（`{ decision: "deny", systemMessage: "..." }`）并引导改用 OpenViking MCP 工具；其他工具调用明确放行（`{ decision: "allow" }`）。
-- **Stop** 从 `transcript.jsonl` 增量捕获新回合，并在每个回合由后台 worker 执行会话提交（`commitTurnThreshold = 1`）。
+- **PreToolUse**（matcher 为 `read_file`）拦截以本地路径读取 `viking://` 虚拟路径的调用，返回拒绝（`{ decision: "deny", reason: "..." }`）；拒绝原因会传达给 Agent，引导其改用 OpenViking MCP 工具。其他调用明确放行（`{ decision: "allow" }`）。
+- **Stop** 从 `transcript_full.jsonl` 增量捕获新回合（用户文本、助手文本，以及每个工具调用及其输出或错误），并由后台 worker 在每次捕获到内容的 Stop 之后提交会话。
 
 插件 manifest 还通过 `mcp_config.json` 将 OpenViking MCP 服务以 stdio 代理暴露，支持 Antigravity 的 `call_mcp_tool`（带有 `ServerName: "openviking-memory_openviking"`）调用，并提供 `openviking-memory` skill。hook 与 MCP 读取同一份凭据，不会在服务端、账号或用户上各说各话。
 
