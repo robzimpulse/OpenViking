@@ -11,9 +11,11 @@ import { readFileSync } from "node:fs";
 
 import {
   collectToolNamesByIdFromEntries,
+  extractPartsFromPayload,
   extractTextFromPayload,
   normalizeCaptureRole,
   sanitizeCapturedText,
+  shapeCaptureParts,
 } from "../../memory-plugin-shared/lib/capture-utils.mjs";
 
 /** Parse JSONL lines into an array of object records. */
@@ -54,11 +56,24 @@ export function antigravityUserText(raw) {
 }
 
 /**
+ * Map an Antigravity record status onto the server's tool_status vocabulary
+ * (pending | running | completed | error). `undefined` lets the shared part builder
+ * default a result to "completed"; ERROR is carried by `is_error`.
+ */
+function toolResultStatus(status) {
+  return String(status || "").toUpperCase() === "RUNNING" ? "running" : undefined;
+}
+
+/**
  * Extract user and assistant turns from parsed Antigravity records.
- * Purpose: each turn keeps its text, tool calls and tool results (outputs and errors) as
- * content blocks in transcript order, rendered by the shared `extractTextFromPayload`
- * (`[tool-call name] …` / `[tool-result name] …`), so the server receives the tool activity
- * and the shared capture filter recognises tool-only turns.
+ * Purpose: a user message is one turn, and each model step (`PLANNER_RESPONSE` plus the
+ * `GENERIC` tool results that answer its calls) is one assistant turn, as other hosts send
+ * one message per model call. Each turn carries:
+ *   - `parts`: structured text and `tool` parts (shared `extractPartsFromPayload` +
+ *     `shapeCaptureParts`), sent to the server so tool calls/results are stored as tool
+ *     parts rather than flattened into text;
+ *   - `content`: the shared text rendering (`[tool-call name] …` / `[tool-result name] …`),
+ *     used only for the capture decision and dedup, so tool-only steps are not dropped.
  * Usage: `extractAntigravityTurns(parseTranscript(raw), cfg)`; turn IDs are the opening
  * record index, and `cfg.captureAssistantTurns === false` drops assistant turns.
  */
@@ -98,15 +113,14 @@ export function extractAntigravityTurns(records, cfg = {}) {
 
     if (type === "PLANNER_RESPONSE") {
       if (source !== "MODEL") return;
-      if (current?.role !== "assistant") {
-        flush();
-        current = {
-          role: "assistant",
-          blocks: [],
-          recordIndex: index,
-          unansweredCalls: [],
-        };
-      }
+      // Every model step opens its own assistant turn.
+      flush();
+      current = {
+        role: "assistant",
+        blocks: [],
+        recordIndex: index,
+        unansweredCalls: [],
+      };
       if (typeof record.content === "string" && record.content.trim()) {
         current.blocks.push({ type: "text", text: record.content.trim() });
       }
@@ -153,7 +167,7 @@ export function extractAntigravityTurns(records, cfg = {}) {
         name,
         output,
         call_id,
-        status: record.status,
+        status: toolResultStatus(status),
         ...(is_error ? { is_error: true } : {}),
       };
       current.blocks.push(toolResult);
@@ -171,9 +185,17 @@ export function extractAntigravityTurns(records, cfg = {}) {
     if (payload.role === "assistant" && cfg.captureAssistantTurns === false) continue;
     const text = extractTextFromPayload(payload, { toolNameById }).trim();
     if (!text) continue;
+    const role = normalizeCaptureRole(payload.role);
+    const toolMaxChars = cfg.captureToolMaxChars || Infinity;
+    const { parts } = shapeCaptureParts(
+      extractPartsFromPayload(payload, { toolMaxChars, toolNameById }),
+      role,
+      cfg,
+    );
     turns.push({
-      role: normalizeCaptureRole(payload.role),
+      role,
       content: cleanAntigravityText(text),
+      parts,
       turnId: String(collected[index].recordIndex),
     });
   }

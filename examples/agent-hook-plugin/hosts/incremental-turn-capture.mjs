@@ -1,3 +1,12 @@
+/**
+ * Shared incremental capture for transcript-reading agent-hook hosts.
+ * Purpose: turns a host's decoded turns ({role, content, parts?, turnId}) into session
+ * message payloads, skipping turns already acknowledged, and advances the capture cursor
+ * only over acknowledged turns. `content` drives the capture decision and dedup; a turn
+ * with structured `parts` sends those instead of the text.
+ * Usage: `buildIncrementalCapturePlan(turns, state, cfg)` → send `plan.payloads` →
+ * `applyIncrementalCaptureResult(state, plan, sendResult, cleanText)` → persist the state.
+ */
 import { stableHash } from "../../memory-plugin-shared/lib/agent-hook-runtime.mjs";
 import { shouldCaptureText } from "../../memory-plugin-shared/lib/capture-utils.mjs";
 
@@ -25,9 +34,12 @@ export function buildIncrementalCapturePlan(turns, state = {}, cfg = {}) {
     seenInBatch.add(batchKey);
     return true;
   });
+  // A turn that carries structured `parts` (text + `tool` parts) sends them, so the
+  // server stores tool activity as tool parts; `content` stays the capture-decision
+  // text. Text-only turns keep sending `content` unchanged.
   const payloads = toSend.map(({ turn, content }) => ({
     role: turn.role,
-    content,
+    ...(Array.isArray(turn.parts) && turn.parts.length > 0 ? { parts: turn.parts } : { content }),
     ...(turn.turnId ? { turn_id: turn.turnId } : {}),
   }));
   return { candidates, toSend, payloads };

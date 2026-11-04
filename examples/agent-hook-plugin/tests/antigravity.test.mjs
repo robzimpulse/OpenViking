@@ -317,7 +317,19 @@ test("stop captures user, assistant and tool turns, then commits", async () => {
         assert.equal(seen.commit, 1);
         assert.ok(seen.sessions.every((s) => s.startsWith("ag-")));
         const msgs = seen.batches[0].messages;
-        assert.deepEqual(msgs.map((m) => m.role), ["user", "assistant"]);
+        assert.deepEqual(msgs.map((m) => m.role), ["user", "assistant", "assistant"]);
+        // Tool activity goes on the wire as structured parts (rendered as tool
+        // cards), not flattened into one text blob.
+        const toolParts = msgs.flatMap((m) => m.parts || []).filter((p) => p.type === "tool");
+        assert.deepEqual(
+          toolParts.map((p) => [p.tool_name, p.tool_status]),
+          [
+            ["call_mcp_tool", "running"],
+            ["call_mcp_tool", "completed"],
+            ["run_command", "running"],
+            ["run_command", "running"],
+          ],
+        );
 
         // Second identical Stop -> capture with no new records returns null, no new requests
         const r2 = await runHookScript(HOOK, {
