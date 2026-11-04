@@ -71,10 +71,18 @@ export async function readHookInput() {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
+/**
+ * Resolve the working directory for an agent hook invocation.
+ * Purpose: Extracts the session's active workspace from input.cwd, Antigravity's
+ * workspacePaths, or generic workspace_roots / workspaceRoots arrays.
+ * Usage: Called by runHookStage to reload workspace-specific config and resolve peers.
+ */
 export function resolveAgentCwd(input = {}) {
-  const workspaceRoots = Array.isArray(input.workspace_roots)
-    ? input.workspace_roots
-    : Array.isArray(input.workspaceRoots) ? input.workspaceRoots : [];
+  const workspaceRoots = Array.isArray(input.workspacePaths)
+    ? input.workspacePaths
+    : Array.isArray(input.workspace_roots)
+      ? input.workspace_roots
+      : Array.isArray(input.workspaceRoots) ? input.workspaceRoots : [];
   return String(
     input.cwd
       || workspaceRoots.find((value) => typeof value === "string" && value.trim())
@@ -83,8 +91,14 @@ export function resolveAgentCwd(input = {}) {
   );
 }
 
+/**
+ * Resolve a stable native session ID from an input payload.
+ * Purpose: Extracts direct conversation/session IDs (including Antigravity's conversationId),
+ * falls back to parsing UUID from transcriptPath, or computes a directory-based hash.
+ * Usage: Called to derive harness session IDs and locate state files.
+ */
 export function resolveNativeSessionId(input = {}) {
-  const direct = input.conversation_id || input.session_id || input.sessionId || input.generation_id;
+  const direct = input.conversation_id || input.conversationId || input.session_id || input.sessionId || input.generation_id;
   if (direct) return safePart(direct);
   const transcript = input.transcript_path || input.transcriptPath;
   if (transcript) {

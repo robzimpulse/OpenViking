@@ -260,6 +260,7 @@ export const WORKSPACE_RANGES = Object.fromEntries(
  * lands on the right override instead of on a silent no-op.
  */
 export const HARNESS_KEYS = {
+  antigravity: "antigravity",
   claudeCode: "claude_code",
   codebuddy: "codebuddy",
   codex: "codex",
