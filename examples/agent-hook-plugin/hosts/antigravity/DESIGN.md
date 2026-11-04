@@ -14,9 +14,18 @@ environment key names and raw stdin to a local JSONL log, returned a valid respo
 conversations, 9 user turns, including tool loops (`run_command`, `read_file`), a retried
 message, an app restart and a return to an earlier conversation.
 
+**Second pass** (same App 2.28.2, model `gemini-3.8-flash-high`, macOS darwin 25.4.0,
+2026-11-04): three probe rounds against the §10 pending items — unique random markers per
+injection, tools forbidden when asking the model what it sees, and every conclusion about
+cross-turn visibility drawn only from markers the model had not echoed before (an echoed marker
+stays visible through the model's own earlier reply). Covered: `systemMessage` delivery and
+persistence, ephemeral lifetime, deny `reason`, MCP startup and tool namespace, queued messages,
+a cancelled turn.
+
 Legend: **verified** = observed in a real session · *documented* = only in the host docs
-(`antigravity.google/docs/hooks`, `/docs/build-plugins`, `/docs/plugins`) · **pending** = not
-reproduced.
+(`antigravity.google/docs/hooks`, `/docs/build-plugins`, `/docs/plugins`, and the copy the App
+ships at `~/.gemini/antigravity/builtin/skills/agy-customizations/docs/hooks.md`) ·
+**pending** = not reproduced.
 
 ## 1. Versions and platforms
 
@@ -35,7 +44,8 @@ reproduced.
 | `agy plugin install <dir>` / GitHub URL / marketplace | *documented*; GitHub subdirectory support undocumented |
 | Manifest | `plugin.json` at the root (or `.antigravity-plugin/plugin.json`); `additionalProperties: false`, `name` kebab-case (*documented*) |
 | Hooks file | `hooks.json` at the plugin root (**verified**) |
-| MCP file | `mcp_config.json` at the root, `mcpServers` map; tools namespaced `<plugin>_<server>` (*documented*, **pending**) |
+| MCP file | `mcp_config.json` at the root, `mcpServers` map; server registered as `<plugin>_<server>` (**verified**, see below) |
+| Validation | `agy plugin validate <dir>` (CLI 1.0.16) checks manifest, hooks and MCP config; it takes no `--strict` flag (**verified**) |
 
 - Hook commands run with **cwd = plugin root** (**verified**), so commands use relative paths
   (`node ./scripts/hook.mjs …`). Absolute paths are unnecessary and unportable.
@@ -43,6 +53,17 @@ reproduced.
   `PLUGIN_*` keys in the hook environment). They are *documented* for MCP `args`/`cwd`/`env`.
 - The plugin root is read-only and replaced on update (*documented*): hook state must live
   outside it (the shared runtime's `~/.openviking/...` paths already do).
+- MCP servers (**verified**): started with **cwd = plugin root**; `${PLUGIN_ROOT}` in `args`
+  is expanded to the absolute plugin root; the server inherits the login-shell environment plus
+  `PLUGIN_ROOT`, `PLUGIN_DATA` (`~/.gemini/antigravity/plugin_data/<plugin>`) and the `env`
+  entries from `mcp_config.json`. The client sends `server/discover`, then `initialize` with
+  `protocolVersion: "2025-11-25"`, `notifications/initialized`, `tools/list`; `tools/call`
+  carries `_meta` keys `antigravity.google/artifacts_dir` and `antigravity.google/conversa…`.
+- The model does **not** get one tool per MCP tool. It calls a generic built-in tool
+  `call_mcp_tool {ServerName: "<plugin>_<server>", ToolName, Arguments}`, and first reads the
+  tool's schema with `read_file` from `~/.gemini/antigravity/mcp/<plugin>_<server>/<tool>.json`.
+  For this plugin: `ServerName: "openviking-memory_openviking"`. Both calls pass through
+  `PreToolUse`; a guard must keep allowing those schema reads (they are local paths).
 - MCP `variables` can prompt the user for an API key (*documented*), but nothing says they
   reach hooks. Using them would split hook and MCP credentials; resolve both through the
   shared `ovcli.conf` loader instead (§4.2 of the standard).
@@ -60,11 +81,18 @@ Handler: `{ "type": "command", "command": "…", "timeout": <seconds> }`.
 | `PostInvocation` | **verified** | After every model call. |
 | `PreToolUse` | **verified** | Per tool call; `matcher: "*"` matched `run_command`, `read_file`. |
 | `PostToolUse` | **verified** | Per tool call. |
-| `Stop` | **verified** | Once per turn. Observed `terminationReason: "NO_TOOL_CALL"`, `fullyIdle: true`, `executionNum: 0` on every turn. |
+| `Stop` | **verified** | Once per completed turn. Observed `terminationReason: "NO_TOOL_CALL"` and `executionNum: 0` on every turn; `fullyIdle: false` when the user had already queued the next message (the doc describes it as "all background tasks are done"). **Not fired for a turn the user cancels** (twice, see below). |
 | `UserPromptSubmit`, `SessionEnd`, `PreCompact`, subagent events | **do not exist** | No session-end signal at all. |
 
 Handlers of one event ran **sequentially** (≈45 ms apart) and **block** the agent: a handler
 sleeping under a 1 s timeout delayed the following `PreInvocation` by ≈1 s.
+
+**Cancelled turn (verified twice)**: pressing stop while the model was generating left a
+`PreInvocation` with no `PostInvocation` and no `Stop`; the transcript kept the turn's
+`USER_INPUT` and, for a cancelled background task, a later host `SYSTEM_MESSAGE`
+("Task id … was canceled"). The documented `terminationReason: "USER_CANCELED"` was never
+delivered. Records of a cancelled turn are therefore captured by the next `Stop` of that
+conversation, or not at all if the conversation is never continued.
 
 ## 4. Input (stdin JSON, camelCase)
 
@@ -87,23 +115,43 @@ sleeping under a 1 s timeout delayed the following `PreInvocation` by ≈1 s.
 2. `conversationId` is the native session id (UUID); map it to `session_id`.
 3. The prompt comes from `lastUserInput`; no transcript read is needed for recall.
 4. `PreInvocation` fires for tool-loop continuations with the same `lastUserInput`: recall
-   once per user turn and reuse the cached block for later invocations (see §5).
+   and inject once per user turn, at `invocationNum` 0 (see §5).
+5. **Queued messages (verified)**: when the user sends a message while the previous turn is
+   still running, that message's `PreInvocation` with `invocationNum: 0` still carries the
+   **previous** turn's `lastUserInput`; the new text appears from `invocationNum: 1` on. The
+   transcript does not have it yet either: its `USER_INPUT` record is written after the
+   ephemeral injected at invocation 0, and the model sees that ephemeral placed before the new
+   request. A message sent after the previous turn finished had the correct `lastUserInput`
+   at invocation 0 (three turns). A queued message therefore gets the previous message's
+   recall when its turn has no tool call; the previous `Stop` reporting `fullyIdle: false`
+   is the only signal that a message was queued.
 
 ## 5. Output
 
 | Event | Shape | Verified behaviour |
 | --- | --- | --- |
 | `SessionStart`, `PreInvocation` | `{"injectSteps":[{"ephemeralMessage":"…"}]}` | Injected and recorded in the transcript as `EPHEMERAL_MESSAGE` (`source: "SYSTEM_SDK"`). |
-| `PreToolUse` | `{"decision":"allow"\|"deny"\|"ask"\|…, "reason"?}` | ⚠️ **`{}` is a deny** (`tool call denied by pre-tool hook`). Pass-through must be `{"decision":"allow"}`, which kept the normal permission flow. `auto_approve` skips prompts — never a pass-through. |
+| `SessionStart` | `{"injectSteps":[{"systemMessage":{"systemMessage":"…"}}]}` — a **nested object** | Injected and recorded as `SYSTEM_MESSAGE` (`source: "SYSTEM_SDK"`), wrapped by the host as "The following system message was injected by a SessionStart hook: …". **Persists across turns** (verified on turn 3 with a marker the model had not echoed). The UI shows it as a collapsible "System Message" row (*documented*: `metadata.user_markdown` changes that). |
+| `PreToolUse` | `{"decision":"allow"\|"deny"\|"ask"\|"force_ask", "reason"?, "permissionOverrides"?, "overwrite"?}` | ⚠️ **`{}` is a deny** (`tool call denied by pre-tool hook`). Pass-through must be `{"decision":"allow"}`, which kept the normal permission flow. `auto_approve` skips prompts — never a pass-through. A deny's `reason` **reaches the model**: the tool result is `Encountered error in step execution: tool call denied by pre-tool hook: <reason>` (`GENERIC`, `status: "ERROR"`), and the model quoted it verbatim (**verified**). |
 | `PostInvocation`, `PostToolUse` | `{}` | accepted |
 | `Stop` | `{}` | accepted; only `decision: "continue"` would keep the loop running (*documented*) |
 
-**Ephemeral lifetime (verified)**: with tools forbidden, the model reported the marker
-injected for the current invocation (appended directly after the user request) and **not**
-the marker injected on the previous turn. An `ephemeralMessage` therefore does not survive
-into later turns. Whether it survives from invocation 0 into invocation 1 of the same turn is
-**pending**; the adapter re-injects the cached recall block on every `PreInvocation` of the
-turn so tool-loop calls keep memory either way.
+⚠️ **A malformed step drops the whole output, silently** (**verified**): a plain-string
+`systemMessage` was not delivered, and an `ephemeralMessage` sent in the same `injectSteps`
+array was dropped with it — no transcript record, nothing visible to the model, nothing in the
+host's logs. Only send step shapes listed above; test any new one in the App.
+
+**Ephemeral lifetime (verified)**:
+- **Within a turn it survives**: at invocation 1 the model quoted the marker injected at
+  invocation 0 of the same turn, which it had not echoed before. Injecting at every invocation
+  would therefore stack copies of the same block in a tool loop; inject once, at
+  `invocationNum` 0.
+- **It does not survive into later turns**: on turn 3 the model reported none of the markers
+  injected on turns 1–2 (none of them echoed), while it did report the `systemMessage` from
+  `SessionStart`. A marker the model echoed in a reply stays visible only through that reply.
+
+Placement: the model sees the ephemeral appended right after the current user request (or
+right before it, for a queued message — §4).
 
 ## 6. Exit codes
 
@@ -131,7 +179,18 @@ turn so tool-loop calls keep memory either way.
 | `PLANNER_RESPONSE` | `MODEL` | yes — `content` (final text, may be absent on tool-only steps), `tool_calls: [{name, args}]`; `thinking` excluded |
 | `GENERIC` | `MODEL` | tool result text (`Created At:…Command output:…`), `status: "ERROR"` + `error` on denial; pairs with the preceding `tool_calls` in order |
 | `EPHEMERAL_MESSAGE` | `SYSTEM_SDK` | **never** — this is injected context, including recalled memory |
-| `SYSTEM_MESSAGE` | `SYSTEM` | no — host notices (e.g. "subagents stopped due to server restart") |
+| `SYSTEM_MESSAGE` | `SYSTEM_SDK` | **never** — a hook-injected `systemMessage`, i.e. the profile |
+| `SYSTEM_MESSAGE` | `SYSTEM` | no — host notices (e.g. "subagents stopped due to server restart", "Task id … was canceled") |
+
+- A tool the host moves to the background (`run_command` with a long command) produces a
+  `GENERIC` with `status: "RUNNING"` ("Tool is running as a background task with task id …"),
+  and the turn ends with a normal `Stop`; completion or cancellation arrives later as a host
+  `SYSTEM_MESSAGE`.
+- MCP calls appear as `PLANNER_RESPONSE.tool_calls[{name: "call_mcp_tool", args: {ServerName,
+  ToolName, Arguments}}]` followed by a `GENERIC` holding the tool's text output.
+- `PLANNER_RESPONSE` records also carry `input_tokens`, `cache_read_tokens`, `output_tokens`.
+- Record order is not `created_at` order: a queued message's `USER_INPUT` (created when the
+  user sent it) is written after its turn's first `EPHEMERAL_MESSAGE`.
 
 - **Flush timing: complete at `Stop`** (**verified**): the copy taken by every `Stop` handler
   already contained that turn's final `PLANNER_RESPONSE`.
@@ -152,10 +211,11 @@ turn so tool-loop calls keep memory either way.
 
 ## 10. Pending
 
-- `invocationNum` 0 → 1 ephemeral survival within one turn.
-- MCP: `mcp_config.json` startup cwd, environment inheritance, tool namespace in practice.
-- `PreToolUse` `deny` + `reason`: whether the reason reaches the model as the tool result
-  (needed for the URI guard).
-- `executionNum` / `terminationReason` values other than `0` / `NO_TOOL_CALL`
-  (cancellation, errors, max steps).
+- `executionNum` / `terminationReason` values other than `0` / `NO_TOOL_CALL` (errors, max
+  invocations). A cancelled turn sends no `Stop` at all (§3).
+- Ephemeral survival beyond invocation 1 of a turn (verified only 0 → 1).
 - Linux, Windows; Antigravity CLI and IDE.
+
+Resolved in the second pass: ephemeral survival within a turn and across turns (§5),
+`systemMessage` shape and persistence (§5), deny `reason` visibility (§5), MCP startup, cwd,
+environment and tool namespace (§2), cancellation (§3), queued messages (§4).
