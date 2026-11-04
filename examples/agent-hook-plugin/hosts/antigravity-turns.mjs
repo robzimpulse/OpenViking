@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 
 import {
   collectToolNamesByIdFromEntries,
-  extractPartsFromPayload,
+  extractTextFromPayload,
   normalizeCaptureRole,
   sanitizeCapturedText,
 } from "../../memory-plugin-shared/lib/capture-utils.mjs";
@@ -53,43 +53,21 @@ export function antigravityUserText(raw) {
   return inner.trim();
 }
 
-function formatToolInput(value) {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-/** Assemble turn text from parts, including running tool calls and background results. */
-function textFromParts(parts) {
-  const chunks = [];
-  for (const part of parts) {
-    if (part.type !== "tool") {
-      chunks.push(part.text);
-    } else if (part.tool_output !== undefined) {
-      if (String(part.tool_status || "").toLowerCase() === "running") {
-        chunks.push(part.tool_output);
-      }
-    } else {
-      const inputStr = part.tool_input !== undefined ? `\n${formatToolInput(part.tool_input)}` : "";
-      chunks.push(`[tool: ${part.tool_name || "unknown"}]${inputStr}`);
-    }
-  }
-  return chunks.join("\n\n").trim();
-}
-
 /**
  * Extract user and assistant turns from parsed Antigravity records.
- * Assigns line-based turn IDs (opening record index) and respects captureAssistantTurns switch.
+ * Purpose: each turn keeps its text, tool calls and tool results (outputs and errors) as
+ * content blocks in transcript order, rendered by the shared `extractTextFromPayload`
+ * (`[tool-call name] …` / `[tool-result name] …`), so the server receives the tool activity
+ * and the shared capture filter recognises tool-only turns.
+ * Usage: `extractAntigravityTurns(parseTranscript(raw), cfg)`; turn IDs are the opening
+ * record index, and `cfg.captureAssistantTurns === false` drops assistant turns.
  */
 export function extractAntigravityTurns(records, cfg = {}) {
   const collected = [];
   let current = null;
 
   const flush = () => {
-    if (current && (current.texts.length > 0 || current.tools.length > 0)) {
+    if (current && current.blocks.length > 0) {
       collected.push(current);
     }
     current = null;
@@ -111,8 +89,7 @@ export function extractAntigravityTurns(records, cfg = {}) {
       flush();
       current = {
         role: "user",
-        texts: [ask],
-        tools: [],
+        blocks: [{ type: "text", text: ask }],
         recordIndex: index,
       };
       flush();
@@ -125,14 +102,13 @@ export function extractAntigravityTurns(records, cfg = {}) {
         flush();
         current = {
           role: "assistant",
-          texts: [],
-          tools: [],
+          blocks: [],
           recordIndex: index,
           unansweredCalls: [],
         };
       }
       if (typeof record.content === "string" && record.content.trim()) {
-        current.texts.push(record.content.trim());
+        current.blocks.push({ type: "text", text: record.content.trim() });
       }
       if (Array.isArray(record.tool_calls)) {
         record.tool_calls.forEach((call, i) => {
@@ -142,7 +118,7 @@ export function extractAntigravityTurns(records, cfg = {}) {
             arguments: call.args ?? call.arguments,
             call_id: `${index}:${i}`,
           };
-          current.tools.push(callObj);
+          current.blocks.push(callObj);
           current.unansweredCalls.push(callObj);
         });
       }
@@ -155,8 +131,7 @@ export function extractAntigravityTurns(records, cfg = {}) {
         flush();
         current = {
           role: "assistant",
-          texts: [],
-          tools: [],
+          blocks: [],
           recordIndex: index,
           unansweredCalls: [],
         };
@@ -181,28 +156,20 @@ export function extractAntigravityTurns(records, cfg = {}) {
         status: record.status,
         ...(is_error ? { is_error: true } : {}),
       };
-      current.tools.push(toolResult);
+      current.blocks.push(toolResult);
     }
   });
 
   flush();
 
-  const turnPayloads = collected.map((turn) => ({
-    role: turn.role,
-    content: [
-      ...turn.texts.map((text) => ({ type: "text", text })),
-      ...turn.tools,
-    ],
-  }));
+  const turnPayloads = collected.map((turn) => ({ role: turn.role, content: turn.blocks }));
 
   const toolNameById = collectToolNamesByIdFromEntries(turnPayloads);
 
   const turns = [];
   for (const [index, payload] of turnPayloads.entries()) {
     if (payload.role === "assistant" && cfg.captureAssistantTurns === false) continue;
-    const parts = extractPartsFromPayload(payload, { toolMaxChars: Infinity, toolNameById });
-    if (parts.length === 0) continue;
-    const text = textFromParts(parts);
+    const text = extractTextFromPayload(payload, { toolNameById }).trim();
     if (!text) continue;
     turns.push({
       role: normalizeCaptureRole(payload.role),
