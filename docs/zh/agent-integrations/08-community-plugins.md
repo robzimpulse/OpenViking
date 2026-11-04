@@ -112,6 +112,50 @@ curl -fsSL https://openviking.ai/install | bash -s -- --uninstall --yes --harnes
 
 经过实测的宿主契约、transcript 格式以及本适配器 v1 的范围，记录在 [`hosts/codebuddy/DESIGN.md`](https://github.com/volcengine/OpenViking/blob/main/examples/agent-hook-plugin/hosts/codebuddy/DESIGN.md)。
 
+## Google Antigravity 记忆集成
+
+源码：[examples/agent-hook-plugin](https://github.com/volcengine/OpenViking/tree/main/examples/agent-hook-plugin)
+
+Google Antigravity 集成是 `agent-hook-plugin` 的宿主适配器：复用共享的 OpenViking hook 运行时，只新增 Antigravity 特有的事件映射、transcript 解码、输出信封与提交策略：
+
+- **SessionStart** 注入用户画像为持久化系统消息（`{ systemMessage: { systemMessage: "<text>" } }`），在 Antigravity App 的对话记录中显示为“System Message”行；同时重放离线会话排队的写入。
+- **PreInvocation** 在每轮 prompt 开始时（`invocationNum === 0`）召回相关记忆，以临时消息（`{ ephemeralMessage: "<text>" }`）注入上下文。同一回合后续的循环步骤（`invocationNum > 0`）跳过召回。
+- **PreToolUse** 拦截本地文件工具对 `viking://` 虚拟路径的访问，返回拒绝（`{ decision: "deny", systemMessage: "..." }`）并引导改用 OpenViking MCP 工具；其他工具调用明确放行（`{ decision: "allow" }`）。
+- **Stop** 从 `transcript.jsonl` 增量捕获新回合，并在每个回合由后台 worker 执行会话提交（`commitTurnThreshold = 1`）。
+
+插件 manifest 还通过 `mcp_config.json` 将 OpenViking MCP 服务以 stdio 代理暴露，支持 Antigravity 的 `call_mcp_tool`（带有 `ServerName: "openviking-memory_openviking"`）调用，并提供 `openviking-memory` skill。hook 与 MCP 读取同一份凭据，不会在服务端、账号或用户上各说各话。
+
+### 安装
+
+前置条件：Google Antigravity App、Node.js 18+，以及正在运行的 OpenViking 服务。
+
+```bash
+curl -fsSL https://openviking.ai/install | bash -s -- --yes --harness antigravity
+# AI agents: not sure about running this? The script's header says what it does and how to verify it.
+```
+
+安装脚本在 `~/.gemini/config/plugins/openviking-memory/` 下组装自包含原生插件。安装后重启 Antigravity App 以加载插件。
+
+只移除本集成：
+
+```bash
+curl -fsSL https://openviking.ai/install | bash -s -- --uninstall --yes --harness antigravity
+```
+
+插件从 `~/.openviking/ovcli.conf` 读取连接信息；`OPENVIKING_URL` 与 `OPENVIKING_API_KEY` 可覆盖该文件，按插件的配置位于 `plugin.antigravity` 下（见[插件配置](../configuration/02-client.md#插件配置)）。安装、更新或卸载后请重启 Antigravity App。
+
+### 宿主决定的行为与限制
+
+- **无会话结束或压缩 hook**：宿主不提供 `SessionEnd` 与 `PreCompact`。为防止数据丢失，每个 `Stop` 均执行提交。
+- **取消的回合**：被取消的回合不会触发 `Stop`，未捕获的内容会在下一个顺利完成的回合补齐。
+- **并发/排队消息**：在上一回合未结束时发送的用户消息，其 `PreInvocation` 会在上一回合的 `Stop` 之前触发，因此读取的是上一回合状态的召回。
+- **系统消息行**：`SessionStart` 注入的用户画像会在界面 transcript 中作为“System Message”条目展示。
+- **MCP 工具调用**：宿主通过 `call_mcp_tool` 路由 MCP 工具调用。
+- **重试分叉**：用户重试某条 prompt 时，被废弃的分支仍保存在 OpenViking 服务端，后续轮次继续跟踪当前活跃分支。
+- **仅限 App 运行时**：已在 Google Antigravity App（macOS 2.28+）验证；独立 CLI（`agy`）与 IDE 扩展环境未经实测。
+
+经过实测的宿主契约、transcript 格式以及本适配器 v1 的范围，记录在 [`hosts/antigravity/DESIGN.md`](https://github.com/volcengine/OpenViking/blob/main/examples/agent-hook-plugin/hosts/antigravity/DESIGN.md)。
+
 ## AstrBot 插件
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是一个多平台 IM Bot 框架，支持 QQ、Telegram、Discord、飞书等 20+ 平台。

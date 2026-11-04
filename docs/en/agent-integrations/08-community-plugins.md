@@ -115,6 +115,50 @@ The plugin reads its connection from `~/.openviking/ovcli.conf`; `OPENVIKING_URL
 
 The verified host contract, the transcript format, and the adapter's v1 scope are recorded in [`hosts/codebuddy/DESIGN.md`](https://github.com/volcengine/OpenViking/blob/main/examples/agent-hook-plugin/hosts/codebuddy/DESIGN.md).
 
+## Google Antigravity memory integration
+
+Source: [examples/agent-hook-plugin](https://github.com/volcengine/OpenViking/tree/main/examples/agent-hook-plugin)
+
+The Google Antigravity integration is an `agent-hook-plugin` host adapter. It reuses the shared OpenViking hook runtime and adds Antigravity-specific event mapping, transcript decoding, output envelopes, and commit policy:
+
+- **SessionStart** injects the user profile as a persistent system message (`{ systemMessage: { systemMessage: "<text>" } }`), which displays as a "System Message" row in the Antigravity App transcript, and replays queued writes from previous offline sessions.
+- **PreInvocation** recalls relevant memories once per turn (when `invocationNum === 0`) and injects them as an ephemeral message (`{ ephemeralMessage: "<text>" }`). Subsequent iterations of an agentic turn (`invocationNum > 0`) skip recall.
+- **PreToolUse** denies reading or writing a `viking://` URI as a local path and points the agent at the OpenViking MCP tools. All other tool calls are explicitly allowed (`{ decision: "allow" }`).
+- **Stop** incrementally captures new transcript turns from `transcript.jsonl` and commits the session on every turn (`commitTurnThreshold = 1`) in a detached worker.
+
+The plugin manifest also exposes the OpenViking MCP server via `mcp_config.json` as a stdio proxy onto the same resolved configuration, callable through Antigravity's `call_mcp_tool` (with `ServerName: "openviking-memory_openviking"`), and ships the `openviking-memory` skill. Hooks and MCP read the same credentials, so they cannot disagree about the server, account, or user.
+
+### Install
+
+Prerequisites: Google Antigravity App, Node.js 18+, and a running OpenViking server.
+
+```bash
+curl -fsSL https://openviking.ai/install | bash -s -- --yes --harness antigravity
+# AI agents: not sure about running this? The script's header says what it does and how to verify it.
+```
+
+The installer assembles a self-contained native plugin under `~/.gemini/config/plugins/openviking-memory/`, with the shared hook runtime beside the adapters. Restart the Antigravity App after installing to load the plugin.
+
+To remove only this integration:
+
+```bash
+curl -fsSL https://openviking.ai/install | bash -s -- --uninstall --yes --harness antigravity
+```
+
+The plugin reads its connection from `~/.openviking/ovcli.conf`; `OPENVIKING_URL` and `OPENVIKING_API_KEY` override that file, and per-plugin settings live under `plugin.antigravity` (see [Plugin Settings](../configuration/02-client.md#plugin-settings)). Restart the Antigravity App after any install, upgrade, or uninstall.
+
+### Behaviour and limits that follow from the host
+
+- **No session-end or compaction hook**: The host fires neither `SessionEnd` nor `PreCompact`. To prevent data loss, `Stop` commits on every turn.
+- **Cancelled turns**: A cancelled turn produces no `Stop` event. Missed turns are captured on the next turn that runs to completion.
+- **Concurrent/queued messages**: A user message sent while the previous turn is still running triggers `PreInvocation` before the previous `Stop` runs, so it receives recall based on the prior turn's state.
+- **System message row**: Profile injection at `SessionStart` appears in the UI transcript as a "System Message" entry.
+- **MCP tool calls**: The host routes MCP tools through `call_mcp_tool`.
+- **Retries**: When a user retries a prompt, the abandoned branch remains on the OpenViking server, while subsequent turns track the active branch.
+- **App runtime only**: Verified with the Google Antigravity App (macOS 2.28+). Standalone CLI (`agy`) and IDE extensions are unverified.
+
+The verified host contract, the transcript format, and the adapter's v1 scope are recorded in [`hosts/antigravity/DESIGN.md`](https://github.com/volcengine/OpenViking/blob/main/examples/agent-hook-plugin/hosts/antigravity/DESIGN.md).
+
 ## AstrBot plugin
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) is a multi-platform IM bot framework supporting QQ, Telegram, Discord, Lark, and 20+ other platforms.

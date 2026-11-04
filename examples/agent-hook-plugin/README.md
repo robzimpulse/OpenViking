@@ -1,12 +1,12 @@
 # OpenViking Memory for thin hook hosts
 
-Cursor, TRAE, TRAE CN and ZCode use host configuration files. Kimi Code uses its native managed-plugin directory, and CodeBuddy Code a local plugin marketplace. They share the same dispatcher and memory runtime; the installer assembles the runtime at install time rather than committing a copy per host.
+Cursor, TRAE, TRAE CN and ZCode use host configuration files. Kimi Code and Google Antigravity use native plugin directories, and CodeBuddy Code a local plugin marketplace. They share the same dispatcher and memory runtime; the installer assembles the runtime at install time rather than committing a copy per host.
 
 ```bash
 curl -fsSL https://openviking.ai/install | bash
 ```
 
-The installer asks which harnesses to install and for your OpenViking credentials. To install from a repository checkout instead, run `bash examples/memory-plugin-shared/install.sh --harness <cursor|trae|trae-cn|zcode|kimicode|codebuddy>` from its root.
+The installer asks which harnesses to install and for your OpenViking credentials. To install from a repository checkout instead, run `bash examples/memory-plugin-shared/install.sh --harness <cursor|trae|trae-cn|zcode|kimicode|codebuddy|antigravity>` from its root.
 
 > **Requires an OpenViking server with `viking://~` home-alias support.** Recall targets the caller's own context space through `viking://~/memories` and `viking://~/skills`; the uid-less `viking://user/memories` shorthand is rejected by newer servers.
 
@@ -33,6 +33,7 @@ The memory logic itself is not here: recall, batching, the pending queue, creden
 - **TRAE / TRAE CN** — capture reads `prompt`, `text_content` and `last_assistant_message` off the Stop event rather than parsing a transcript. Every Stop that carries content commits. Sessions are `tr-` and `trcn-`. See the [TRAE guide](../../docs/en/agent-integrations/13-trae.md).
 - **ZCode** — the rollout file is the authoritative incremental transcript: stable host `turnId` values drive deduplication and let a later Stop recover missed turns, and hook stdin is only the fallback. ZCode supports neither `PreCompact` nor `SessionEnd`, so committing on every Stop stands in for both. Its output schema is strict, so a pass-through writes nothing at all. Sessions are `zc-`. [DESIGN.md](./DESIGN.md) records the verified extension surface.
 - **Kimi Code** — `wire.jsonl` is the authoritative transcript. UserPromptSubmit emits raw context text, while Stop, PreCompact and SessionEnd may detach; Interrupt remains synchronous under a two-second OpenViking request budget. The installer creates a self-contained native plugin without editing legacy `config.toml` or `mcp.json`. Sessions are `kc-`. [Host contract](./hosts/kimicode/DESIGN.md).
+- **Google Antigravity** — four hooks. `SessionStart` injects the user profile as a persistent system message and replays offline writes; `PreInvocation` recalls once per turn (`invocationNum === 0`); `PreToolUse` guards `viking://` URIs with explicit allow/deny decisions; `Stop` incrementally captures turns from `transcript.jsonl` and commits on every completed turn in a detached worker. The installer creates a self-contained native plugin under `~/.gemini/config/plugins/openviking-memory`. Sessions are `ag-`. [Host contract](./hosts/antigravity/DESIGN.md).
 
 Cursor tool capture follows the [Hooks contract](https://cursor.com/docs/hooks) and the MCP executor in [`@cursor/sdk` 1.0.38](https://registry.npmjs.org/@cursor/sdk/-/sdk-1.0.38.tgz), which supplies `tool_use_id` on `afterMCPExecution`. Older events without that native identity retain text capture only; the adapter does not invent call IDs or completion evidence.
 
@@ -46,6 +47,12 @@ For Kimi's managed plugin, use its installed path instead:
 
 ```bash
 node "${KIMI_CODE_HOME:-$HOME/.kimi-code}/plugins/managed/openviking-memory/agent-integrations/kimicode/scripts/ov-memory-doctor.mjs" kimicode --offline
+```
+
+For Antigravity's native plugin:
+
+```bash
+node "${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/openviking-memory/agent-integrations/antigravity/scripts/ov-memory-doctor.mjs" antigravity --offline
 ```
 
 For config-driven copies, the client defaults to the one that copy was installed for; pass `cursor`, `trae`, `trae-cn` or `zcode` as an argument to override it. Drop `--offline` to probe the server as well, and add `--json` for a machine-readable report.
