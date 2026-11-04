@@ -63,15 +63,20 @@ test("envelopes use injectSteps", () => {
   assert.deepEqual(antigravity.envelope("pre-invocation", ""), {});
 });
 
-test("normalizeInput makes each turn a distinct prompt event", () => {
+test("normalizeInput maps conversationId and sets no prompt event id", () => {
+  // Undo-and-resend rewinds initialNumSteps, so an id built from it would mark the
+  // re-sent message as a duplicate event and skip its recall.
   const norm = antigravity.normalizeInput({ conversationId: "c", initialNumSteps: 5 });
   assert.equal(norm.session_id, "c");
-  assert.equal(norm.prompt_id, "c:5");
+  assert.equal(norm.prompt_id, undefined);
 });
 
 // ---------------------------------------------------------------------------
 // Hook dispatcher tests with mock server
 // ---------------------------------------------------------------------------
+
+/** Wait past the dispatcher's 500 ms same-prompt duplicate window, as a real next turn does. */
+const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 600));
 
 async function createSandbox(prefix = "ov-ag-test-") {
   const files = await writeCredentialFiles(prefix, {
@@ -154,7 +159,10 @@ test("pre-invocation injects only at invocation 0 and cached block is reused", a
         assert.deepEqual(JSON.parse(r1.stdout.trim()), {});
         assert.equal(searchCalls, searchAfter0, "mock saw no search request during invocation 1");
 
-        // 3. Next turn with same lastUserInput (queued message) -> reuses cached block without search
+        // 3. Next turn with same lastUserInput (queued message) -> reuses cached block without search.
+        //    A real turn lasts at least one model call, so the next turn starts well outside the
+        //    dispatcher's 500 ms same-prompt duplicate window; wait past it.
+        await nextTurn();
         const r2 = await runHookScript(HOOK, {
           argv: ["pre-invocation", "antigravity"],
           input: {
@@ -185,6 +193,23 @@ test("pre-invocation injects only at invocation 0 and cached block is reused", a
         expectExit(r3, 0);
         assert.deepEqual(JSON.parse(r3.stdout.trim()), {});
         assert.equal(searchCalls, searchAfter0, "mock saw no search request without lastUserInput");
+
+        // 5. Undo-and-resend: the re-sent message replays the rewound initialNumSteps (6)
+        //    at invocation 0 and must still get its recall block.
+        await nextTurn();
+        const r4 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            lastUserInput: "q",
+            initialNumSteps: 6,
+            invocationNum: 0,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r4, 0);
+        assert.deepEqual(JSON.parse(r4.stdout.trim()), out0, "re-sent message after undo gets the recall block");
       } finally {
         await rmSync(files.dir, { recursive: true, force: true });
       }
