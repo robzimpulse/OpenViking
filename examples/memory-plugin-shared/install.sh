@@ -60,6 +60,7 @@
 #   zcode      ~/.zcode/cli/config.json, ~/.zcode/hooks.json, ~/.zcode/mcp.json
 #   kimicode   ~/.kimi-code/plugins
 #   codebuddy  a local marketplace registered with codebuddy, installed from ~/.codebuddy/plugins
+#   antigravity ~/.gemini/config/plugins/openviking-memory
 #   opencode   ~/.config/opencode/plugins/openviking, openviking.js, opencode.json(c)
 #   pi         ~/.pi/agent/extensions/openviking
 #   dsh        dsh plugin add into the chosen profile
@@ -239,7 +240,7 @@ usage() {
 Usage: install.sh [options]
 
 Options:
-  --harness LIST     Comma-separated harnesses: claude, codex, cursor, trae, trae-cn, trae-cli, zcode, kimicode, codebuddy, opencode, pi, dsh, dsh-desktop, cli.
+  --harness LIST     Comma-separated harnesses: claude, codex, cursor, trae, trae-cn, trae-cli, zcode, kimicode, codebuddy, antigravity, opencode, pi, dsh, dsh-desktop, cli.
                      Use trae-cli for TraeCode CLI 2.0 (installed through its Codex-compatible plugin format).
                      dsh is the dsh CLI from npm; dsh-desktop is DeepSeek Harness Desktop (macOS only).
                      cli is the OpenViking CLI (ov), installed from npm. Without --harness: the detected ones and cli.
@@ -567,7 +568,7 @@ resolve_dsh_desktop_cli() {
 }
 
 refresh_available_harnesses() {
-  HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_CURSOR=0; HAVE_TRAE=0; HAVE_TRAE_CN=0; HAVE_TRAE_CLI=0; HAVE_OPENCODE=0; HAVE_PI=0; HAVE_ZCODE=0; HAVE_KIMICODE=0; HAVE_CODEBUDDY=0; HAVE_DSH=0; HAVE_DSH_DESKTOP=0
+  HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_CURSOR=0; HAVE_TRAE=0; HAVE_TRAE_CN=0; HAVE_TRAE_CLI=0; HAVE_OPENCODE=0; HAVE_PI=0; HAVE_ZCODE=0; HAVE_KIMICODE=0; HAVE_CODEBUDDY=0; HAVE_ANTIGRAVITY=0; HAVE_DSH=0; HAVE_DSH_DESKTOP=0
   has_available_bin "$CLAUDE_BINS" && HAVE_CLAUDE=1
   has_available_bin "$CODEX_BINS" && HAVE_CODEX=1
   { command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "/Applications/Cursor.app" ] || [ -d "$HOME/.cursor" ]; } && HAVE_CURSOR=1
@@ -581,6 +582,7 @@ refresh_available_harnesses() {
   { command -v zcode >/dev/null 2>&1 || [ -d "$HOME/.zcode" ]; } && HAVE_ZCODE=1
   { command -v kimi >/dev/null 2>&1 || [ -d "$HOME/.kimi-code" ]; } && HAVE_KIMICODE=1
   { command -v codebuddy >/dev/null 2>&1 || [ -d "$HOME/.codebuddy" ]; } && HAVE_CODEBUDDY=1
+  { command -v agy >/dev/null 2>&1 || [ -d "$HOME/.gemini/config/plugins" ]; } && HAVE_ANTIGRAVITY=1
   return 0
 }
 
@@ -728,6 +730,7 @@ SEL_TRAE_CN=0
 SEL_ZCODE=0
 SEL_KIMICODE=0
 SEL_CODEBUDDY=0
+SEL_ANTIGRAVITY=0
 SEL_CLI=0
 TUI_CURSOR=0; TUI_LINES=0
 
@@ -742,7 +745,7 @@ EOF
 }
 
 tui_selectable_count() {
-  printf '%s' $(( $(list_count "$TUI_CLAUDE_BINS") + $(list_count "$TUI_CODEX_BINS") + 10 + DSH_DESKTOP_OFFERED ))
+  printf '%s' $(( $(list_count "$TUI_CLAUDE_BINS") + $(list_count "$TUI_CODEX_BINS") + 11 + DSH_DESKTOP_OFFERED ))
 }
 
 tui_total_count() {
@@ -787,6 +790,8 @@ EOF
   i=$((i + 1))
   if [ "$i" -eq "$idx" ]; then printf 'codebuddy|codebuddy'; return 0; fi
   i=$((i + 1))
+  if [ "$i" -eq "$idx" ]; then printf 'antigravity|antigravity'; return 0; fi
+  i=$((i + 1))
   if [ "$i" -eq "$idx" ]; then printf 'cli|ov'; return 0; fi
   printf 'add|'
 }
@@ -823,6 +828,7 @@ tui_bin_label() {
     zcode:*) printf 'ZCode' ;;
     kimicode:*) printf 'Kimi Code' ;;
     codebuddy:*) printf 'CodeBuddy Code' ;;
+    antigravity:*) printf 'Google Antigravity' ;;
     cli:*) printf 'CLI (ov)' ;;
     claude:*) printf '%s %s' "$bin" "$(t '(Claude-format)' '（Claude 格式）')" ;;
     codex:*) printf '%s %s' "$bin" "$(t '(Codex-format)' '（Codex 格式）')" ;;
@@ -855,6 +861,8 @@ tui_bin_selected() {
     [ "$SEL_KIMICODE" -eq 1 ]
   elif [ "$kind" = "codebuddy" ]; then
     [ "$SEL_CODEBUDDY" -eq 1 ]
+  elif [ "$kind" = "antigravity" ]; then
+    [ "$SEL_ANTIGRAVITY" -eq 1 ]
   elif [ "$kind" = "cli" ]; then
     [ "$SEL_CLI" -eq 1 ]
   else
@@ -870,6 +878,7 @@ tui_bin_detected() { # tui_bin_detected <kind> <bin>
     zcode) [ "$HAVE_ZCODE" -eq 1 ] ;;
     kimicode) [ "$HAVE_KIMICODE" -eq 1 ] ;;
     codebuddy) [ "$HAVE_CODEBUDDY" -eq 1 ] ;;
+    antigravity) [ "$HAVE_ANTIGRAVITY" -eq 1 ] ;;
     dsh) [ "$HAVE_DSH" -eq 1 ] ;;
     dsh-desktop) [ "$HAVE_DSH_DESKTOP" -eq 1 ] ;;
     *) command -v "$2" >/dev/null 2>&1 ;;
@@ -889,6 +898,7 @@ tui_set_all_bins() {
   SEL_ZCODE=1
   SEL_KIMICODE=1
   SEL_CODEBUDDY=1
+  SEL_ANTIGRAVITY=1
   SEL_CLI=1
 }
 
@@ -921,6 +931,8 @@ tui_toggle_bin() {
     SEL_KIMICODE=$((1 - SEL_KIMICODE)); return 0
   elif [ "$kind" = "codebuddy" ]; then
     SEL_CODEBUDDY=$((1 - SEL_CODEBUDDY)); return 0
+  elif [ "$kind" = "antigravity" ]; then
+    SEL_ANTIGRAVITY=$((1 - SEL_ANTIGRAVITY)); return 0
   elif [ "$kind" = "cli" ]; then
     SEL_CLI=$((1 - SEL_CLI)); return 0
   else
@@ -1007,6 +1019,7 @@ tui_reset_bin_selection() {
   SEL_ZCODE=0
   SEL_KIMICODE=0
   SEL_CODEBUDDY=0
+  SEL_ANTIGRAVITY=0
   SEL_CLI=$((1 - UNINSTALL))
   while IFS= read -r bin; do
     [ -n "$bin" ] || continue
@@ -1036,6 +1049,7 @@ EOF
   if [ "$HAVE_ZCODE" -eq 1 ]; then SEL_ZCODE=1; any=1; fi
   if [ "$HAVE_KIMICODE" -eq 1 ]; then SEL_KIMICODE=1; any=1; fi
   if [ "$HAVE_CODEBUDDY" -eq 1 ]; then SEL_CODEBUDDY=1; any=1; fi
+  if [ "$HAVE_ANTIGRAVITY" -eq 1 ]; then SEL_ANTIGRAVITY=1; any=1; fi
   if [ "$any" -ne 1 ]; then
     SEL_CLAUDE_BINS="$TUI_CLAUDE_BINS"
     SEL_CODEX_BINS="$TUI_CODEX_BINS"
@@ -1124,7 +1138,7 @@ tui_has_selection() {
   [ -n "$(list_words "$SEL_CLAUDE_BINS")" ] || [ -n "$(list_words "$SEL_CODEX_BINS")" ] \
     || [ "$SEL_OPENCODE" -eq 1 ] || [ "$SEL_PI" -eq 1 ] || [ "$SEL_DSH" -eq 1 ] || [ "$SEL_DSH_DESKTOP" -eq 1 ] || [ "$SEL_CURSOR_APP" -eq 1 ] \
     || [ "$SEL_TRAE" -eq 1 ] || [ "$SEL_TRAE_CN" -eq 1 ] || [ "$SEL_ZCODE" -eq 1 ] \
-    || [ "$SEL_KIMICODE" -eq 1 ] || [ "$SEL_CODEBUDDY" -eq 1 ] || [ "$SEL_CLI" -eq 1 ]
+    || [ "$SEL_KIMICODE" -eq 1 ] || [ "$SEL_CODEBUDDY" -eq 1 ] || [ "$SEL_ANTIGRAVITY" -eq 1 ] || [ "$SEL_CLI" -eq 1 ]
 }
 
 tui_finish_selection() {
@@ -1143,6 +1157,7 @@ tui_finish_selection() {
   [ "$SEL_ZCODE" -eq 1 ] && SELECTED_HARNESSES="${SELECTED_HARNESSES:+$SELECTED_HARNESSES,}zcode"
   [ "$SEL_KIMICODE" -eq 1 ] && SELECTED_HARNESSES="${SELECTED_HARNESSES:+$SELECTED_HARNESSES,}kimicode"
   [ "$SEL_CODEBUDDY" -eq 1 ] && SELECTED_HARNESSES="${SELECTED_HARNESSES:+$SELECTED_HARNESSES,}codebuddy"
+  [ "$SEL_ANTIGRAVITY" -eq 1 ] && SELECTED_HARNESSES="${SELECTED_HARNESSES:+$SELECTED_HARNESSES,}antigravity"
   [ "$SEL_CLI" -eq 1 ] && SELECTED_HARNESSES="${SELECTED_HARNESSES:+$SELECTED_HARNESSES,}cli"
   return 0
 }
@@ -1219,6 +1234,7 @@ select_harnesses() {
   [ "$HAVE_ZCODE" -eq 1 ] && detected="${detected:+$detected,}zcode"
   [ "$HAVE_KIMICODE" -eq 1 ] && detected="${detected:+$detected,}kimicode"
   [ "$HAVE_CODEBUDDY" -eq 1 ] && detected="${detected:+$detected,}codebuddy"
+  [ "$HAVE_ANTIGRAVITY" -eq 1 ] && detected="${detected:+$detected,}antigravity"
 
   if [ -n "$REQUESTED_HARNESSES" ]; then
     SELECTED_HARNESSES="$REQUESTED_HARNESSES"
@@ -1478,7 +1494,7 @@ validate_selected_harnesses() {
   local h bad=0
   while IFS= read -r h; do
     case "$h" in
-      claude|codex|cursor|trae|trae-cn|opencode|pi|zcode|kimicode|codebuddy|dsh|cli) ;;
+      claude|codex|cursor|trae|trae-cn|opencode|pi|zcode|kimicode|codebuddy|antigravity|dsh|cli) ;;
       dsh-desktop)
         [ "$DSH_DESKTOP_OFFERED" -eq 1 ] || {
           err "$(t 'DeepSeek Harness Desktop (dsh-desktop) is installed by this script on macOS only; on Windows, add the plugin from its Plugins page.' '本脚本仅在 macOS 上安装 DeepSeek Harness Desktop（dsh-desktop）；Windows 上请在其“插件”页添加。')"
@@ -1527,7 +1543,7 @@ EOF
   if contains_harness cli; then ok=1; fi
   # Cursor and TRAE are config-driven integrations. They may be installed
   # before the desktop app itself, so a CLI in PATH is not required.
-  if contains_harness cursor || contains_harness trae || contains_harness trae-cn || contains_harness trae-cli || contains_harness zcode || contains_harness kimicode || contains_harness codebuddy; then ok=1; fi
+  if contains_harness cursor || contains_harness trae || contains_harness trae-cn || contains_harness trae-cli || contains_harness zcode || contains_harness kimicode || contains_harness codebuddy || contains_harness antigravity; then ok=1; fi
   if [ "$ok" -ne 1 ]; then
     err "$(t 'No selected compatible CLI command was found in PATH.' '未在 PATH 中找到任何已选择的兼容 CLI 命令。')"
     exit 2
@@ -2540,7 +2556,7 @@ install_codex() {
 # Cursor / TRAE lifecycle hooks
 # ---------------------------------------------------------------------------
 
-AGENT_HOOK_HOSTS="cursor trae zcode kimicode codebuddy"
+AGENT_HOOK_HOSTS="cursor trae zcode kimicode codebuddy antigravity"
 
 copy_agent_integration() { # copy_agent_integration <host> <dest-name> [destination]
   local host="$1" dest_name="$2" explicit_dest="${3:-}" source dest tmp other
@@ -2783,6 +2799,11 @@ NODE
       warn "$(t 'Could not uninstall the CodeBuddy Code plugin through the codebuddy CLI; its files were left in place. Remove it with:' '未能通过 codebuddy CLI 卸载 CodeBuddy Code 插件，其文件已保留。用这些命令移除：') codebuddy plugin uninstall openviking-memory@openviking; codebuddy plugin marketplace remove openviking; rm -rf \"$HOME/.codebuddy/plugins/cache/openviking\" \"$OV_HOME/agent-integrations/codebuddy\""
     fi
   fi
+  if contains_harness antigravity; then
+    local ag_target="${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/openviking-memory"
+    rm -rf "$ag_target"
+    info "$(t 'Removed the Antigravity plugin.' '已移除 Antigravity 插件。')"
+  fi
   if [ ! -d "$OV_HOME/agent-integrations/cursor" ] \
     && [ ! -d "$OV_HOME/agent-integrations/trae" ] \
     && [ ! -d "$OV_HOME/agent-integrations/trae-cn" ] \
@@ -3019,6 +3040,45 @@ NODE
   else
     warn "$(t 'codebuddy CLI not found in PATH. Register the marketplace with' 'PATH 中未找到 codebuddy CLI。用这条命令注册 marketplace：') codebuddy plugin marketplace add $marketplace"
   fi
+}
+
+# Install the Google Antigravity native plugin bundle into
+# ~/.gemini/config/plugins/openviking-memory (or $ANTIGRAVITY_PLUGINS_DIR/openviking-memory).
+# Purpose: Assembles a self-contained Antigravity plugin bundle with hooks, MCP config,
+# skills, dispatcher, and shared runtime dependency closure.
+# Usage: Called by install.sh when 'antigravity' is among SELECTED_HARNESSES.
+install_antigravity() {
+  step_heading "$(t 'Google Antigravity plugin integration' 'Google Antigravity 插件集成')"
+  local bundle root config host_module target_dir
+  ensure_bundle
+  bundle="$OV_HOME/agent-integrations/antigravity-bundle.$$"
+  rm -rf "$bundle"
+  mkdir -p "$bundle"
+  root="$(assemble_agent_integration antigravity antigravity "$bundle")" || { rm -rf "$bundle"; return 1; }
+  rm -rf "$root/tests"
+  rm -f "$root/README.md" "$root/README_CN.md" "$root/DESIGN.md" "$root/plugin.json"
+  config="$bundle/antigravity-config"
+  cp -R "$root/hosts/antigravity" "$config" || { rm -rf "$bundle"; return 1; }
+  cp "$config/runtime-index.mjs" "$root/hosts/index.mjs" || { rm -rf "$bundle"; return 1; }
+  for host_module in "$root"/hosts/*.mjs; do
+    case "$(basename "$host_module")" in
+      index.mjs|incremental-turn-capture.mjs|antigravity.mjs|antigravity-turns.mjs) ;;
+      *) rm -f "$host_module" ;;
+    esac
+  done
+  rm -rf "$root/hosts/antigravity"
+  # Flatten config into the layout Antigravity reads at the plugin root.
+  cp "$config/plugin.json" "$bundle/plugin.json" || { rm -rf "$bundle"; return 1; }
+  cp "$config/hooks.json" "$bundle/hooks.json" || { rm -rf "$bundle"; return 1; }
+  cp "$config/mcp_config.json" "$bundle/mcp_config.json" || { rm -rf "$bundle"; return 1; }
+  cp -R "$config/skills" "$bundle/skills" || { rm -rf "$bundle"; return 1; }
+  rm -rf "$config"
+  target_dir="${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/openviking-memory"
+  mkdir -p "$(dirname "$target_dir")"
+  rm -rf "$target_dir"
+  mv "$bundle" "$target_dir" || { rm -rf "$bundle"; return 1; }
+  info "$(t 'Google Antigravity native plugin installed:' 'Google Antigravity 原生插件已安装：') $target_dir"
+  info "$(t 'Please restart the Antigravity App to load the plugin.' '请重启 Antigravity App 以加载插件。')"
 }
 install_trae_variant() { # install_trae_variant <trae|trae-cn>
   local client_id="$1" root hooks_path mcp_path
@@ -3465,7 +3525,7 @@ count_steps() {
   STEP_TOTAL=3
   if contains_harness claude; then STEP_TOTAL=$((STEP_TOTAL + $(list_count "$CLAUDE_BINS"))); fi
   if contains_harness codex; then STEP_TOTAL=$((STEP_TOTAL + $(list_count "$CODEX_BINS"))); fi
-  for h in cursor trae trae-cn zcode kimicode codebuddy opencode pi dsh dsh-desktop cli; do
+  for h in cursor trae trae-cn zcode kimicode codebuddy antigravity opencode pi dsh dsh-desktop cli; do
     if contains_harness "$h"; then STEP_TOTAL=$((STEP_TOTAL + 1)); fi
   done
 }
@@ -3575,7 +3635,7 @@ $CODEX_BINS
 EOF
   fi
   if [ "$SOURCE_MODE" = "archive" ] && { contains_harness cursor || contains_harness trae || contains_harness trae-cn \
-    || contains_harness zcode || contains_harness kimicode || contains_harness codebuddy || contains_harness opencode || contains_harness pi; }; then
+    || contains_harness zcode || contains_harness kimicode || contains_harness codebuddy || contains_harness antigravity || contains_harness opencode || contains_harness pi; }; then
     plan_item "$bundle ($(t 'plugin bundle download' '下载插件包'))"
   fi
   if contains_harness cursor; then
@@ -3600,6 +3660,9 @@ EOF
   fi
   if contains_harness codebuddy; then
     plan_paths "CodeBuddy Code" "$HOME/.codebuddy/plugins" "$OV_HOME/agent-integrations/codebuddy"
+  fi
+  if contains_harness antigravity; then
+    plan_paths "Google Antigravity" "${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/openviking-memory"
   fi
   if contains_harness opencode && command -v opencode >/dev/null 2>&1; then
     plan_paths OpenCode "$HOME/.config/opencode/plugins/openviking" "$HOME/.config/opencode/plugins/openviking.js" "$(opencode_config_file)"
@@ -3738,6 +3801,9 @@ EOF
   if contains_harness codebuddy; then
     next_steps "CodeBuddy Code" "$(t 'run /reload-plugins or start a new session' '运行 /reload-plugins 或新建会话')" "$rerun" "" "$uninstall codebuddy"
   fi
+  if contains_harness antigravity; then
+    next_steps "Google Antigravity" "$(t 'restart the Antigravity App' '重启 Antigravity App')" "$rerun" "" "$uninstall antigravity"
+  fi
   if contains_harness opencode && command -v opencode >/dev/null 2>&1; then
     next_steps OpenCode "$(t 'restart OpenCode' '重启 OpenCode')" "$rerun" "" \
       "$(t "rm -rf ~/.config/opencode/plugins/openviking ~/.config/opencode/plugins/openviking.js, then remove mcp.openviking from $(short_path "$(opencode_config_file)")" "rm -rf ~/.config/opencode/plugins/openviking ~/.config/opencode/plugins/openviking.js，再删除 $(short_path "$(opencode_config_file)") 中的 mcp.openviking")"
@@ -3754,7 +3820,7 @@ EOF
       "$(t 'quit DeepSeek Harness Desktop with ⌘Q if it is open, reopen it and start a new conversation' '如 DeepSeek Harness Desktop 已打开，用 ⌘Q 退出后重新打开，再新建对话')" \
       "$(t 're-run this installer, or update it on the Plugins page' '重新运行本安装脚本，或在“插件”页更新')" \
       "\"$DSH_DESKTOP_CLI\" plugin --profile desktop ls" \
-      "$(t "with Desktop quit, \"$DSH_DESKTOP_CLI\" plugin --profile desktop rm $DSH_PACKAGE; or Plugins page → $DSH_PACKAGE → Uninstall" "退出 Desktop 后运行 \"$DSH_DESKTOP_CLI\" plugin --profile desktop rm $DSH_PACKAGE；或在“插件”页 → $DSH_PACKAGE → 卸载")"
+      "$(t "with Desktop quit, \"$DSH_DESKTOP_CLI\" plugin --profile desktop rm $DSH_PACKAGE; or Plugins page → $DSH_PACKAGE → Uninstall" "退出 Desktop 后运行 \"$DSH_DESKTOP_CLI\" plugin --profile desktop rm ${DSH_PACKAGE}；或在“插件”页 → $DSH_PACKAGE → 卸载")"
   elif contains_harness dsh-desktop; then
     next_steps "DeepSeek Harness Desktop" \
       "$(t "open DeepSeek Harness Desktop: Plugins → Add plugin → enter $DSH_PACKAGE → Install, then turn it on if its switch is off" "打开 DeepSeek Harness Desktop：插件 → 添加插件 → 输入 $DSH_PACKAGE → 安装，开关未打开时再打开")" \
@@ -3853,6 +3919,7 @@ if contains_harness trae-cn; then install_trae_variant trae-cn; fi
 if contains_harness zcode; then install_zcode; fi
 if contains_harness kimicode; then install_kimicode; fi
 if contains_harness codebuddy; then install_codebuddy; fi
+if contains_harness antigravity; then install_antigravity; fi
 if contains_harness opencode; then install_opencode; fi
 if contains_harness pi; then install_pi; fi
 if contains_harness dsh; then install_dsh; fi

@@ -13,6 +13,7 @@ import {
   commitAgentSession,
   loadAgentHookConfig,
   makeAgentFetchJSON,
+  resolveAgentCwd,
   resolveNativeSessionId,
   runHookStage,
 } from "./lib/agent-hook-runtime.mjs";
@@ -473,4 +474,21 @@ test("captured messages carry the effective peer in the body, and none when peer
     ],
     [{ role: "user", content: "c" }],
   ]);
+});
+
+/**
+ * Purpose: Verify that resolveAgentCwd and resolveNativeSessionId extract
+ * Antigravity payload spellings (workspacePaths and conversationId).
+ * Usage: Executed as part of agent-hook-runtime.test.mjs test suite.
+ */
+test("resolveAgentCwd reads Antigravity workspacePaths", () => {
+  assert.equal(resolveAgentCwd({ workspacePaths: ["/w/one", "/w/two"] }), "/w/one");
+  assert.equal(resolveAgentCwd({ cwd: "/c", workspacePaths: ["/w"] }), "/c");
+});
+
+test("resolveNativeSessionId reads Antigravity conversationId", () => {
+  assert.equal(
+    resolveNativeSessionId({ conversationId: "dd05c5ed-7667-43d9-b50e-ff541d3aa1dc", transcriptPath: "/x/other/t.jsonl" }),
+    "dd05c5ed-7667-43d9-b50e-ff541d3aa1dc",
+  );
 });

@@ -99,6 +99,7 @@ const HARNESSES = {
   zcode: { label: "ZCode", liveId: hookLiveId("zc-") },
   kimicode: { label: "Kimi Code", liveId: hookLiveId("kc-") },
   codebuddy: { label: "CodeBuddy Code", liveId: hookLiveId("cb-") },
+  antigravity: { label: "Google Antigravity", liveId: hookLiveId("ag-") },
   // Sub-agent sessions are `oc-<parent>__subagent-<child>` live; --input skips them.
   opencode: { label: "OpenCode", liveId: (id) => `oc-${id}` },
   pi: { label: "pi", liveId: (id) => `pi-${id}` },
@@ -111,17 +112,17 @@ const HARNESSES = {
 const HARNESS_ALIASES = {
   claude: "claude_code", "claude-code": "claude_code", claude_code: "claude_code", codex: "codex",
   cursor: "cursor", trae: "trae", "trae-cn": "trae_cn", trae_cn: "trae_cn", "trae-cli": "trae_cli", trae_cli: "trae_cli",
-  zcode: "zcode", kimicode: "kimicode", codebuddy: "codebuddy", opencode: "opencode", pi: "pi", dsh: "dsh", openclaw: "openclaw",
+  zcode: "zcode", kimicode: "kimicode", codebuddy: "codebuddy", antigravity: "antigravity", opencode: "opencode", pi: "pi", dsh: "dsh", openclaw: "openclaw",
   hermes: "hermes",
 };
-const INPUT_NAMES = "claude, codex, cursor, trae, trae-cn, trae-cli, zcode, kimicode, codebuddy, opencode, pi, dsh, openclaw, hermes";
+const INPUT_NAMES = "claude, codex, cursor, trae, trae-cn, trae-cli, zcode, kimicode, codebuddy, antigravity, opencode, pi, dsh, openclaw, hermes";
 // The harness name the plugin passes to its config loader, for ov.conf's
 // legacy section and the `{harness}` peer template variable. OpenClaw and
 // Hermes do not use that loader and name their peers after the agent, not
 // the directory, so no peer is derived for them.
 const PLUGIN_HARNESS = {
   claude_code: "claude-code", codex: "codex", cursor: "cursor", trae: "trae", trae_cn: "trae-cn", trae_cli: "codex",
-  zcode: "zcode", kimicode: "kimicode", codebuddy: "codebuddy", opencode: "opencode", pi: "pi", dsh: "dsh",
+  zcode: "zcode", kimicode: "kimicode", codebuddy: "codebuddy", antigravity: "antigravity", opencode: "opencode", pi: "pi", dsh: "dsh",
 };
 
 const DEFAULTS = { since: "14d", maxSessions: 20, skipActive: "2h", maxMessageChars: 20000 };

@@ -108,6 +108,11 @@ export const SKILL_TARGETS = [
   },
   {
     skill: "openviking-memory",
+    dir: join(ROOT, "examples", "agent-hook-plugin", "hosts", "antigravity", "skills"),
+    committed: true,
+  },
+  {
+    skill: "openviking-memory",
     dir: join(ROOT, "examples", "dsh-memory-plugin", "skills"),
     committed: true,
   },
