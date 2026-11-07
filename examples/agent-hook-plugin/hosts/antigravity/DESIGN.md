@@ -231,6 +231,28 @@ Resolved in the second pass: ephemeral survival within a turn and across turns (
 `systemMessage` shape and persistence (§5), deny `reason` visibility (§5), MCP startup, cwd,
 environment and tool namespace (§2), cancellation (§3), queued messages (§4).
 
+### Failure behaviour (verified 2026-11-07)
+
+Probed against the real dispatcher from the rebased `feat/antigravity-host` (bundle 0.5.32).
+
+| Condition | Observed |
+| --- | --- |
+| Server unreachable at `Stop` | exit 0, `{}`; the user message, assistant message and commit are queued durably under `~/.openviking/pending`, and the cursor advances because the queue owns delivery |
+| MCP server with a dead backend | the proxy stays up; `initialize`, `tools/list` and `tools/call` answer `-32001` naming the URL and `fetch failed`; it exits 0 when stdin closes. MCP tools are unusable for that session |
+| Duplicate `Stop` for the same turn | 0 requests — the cursor is idempotent |
+| Missing or empty transcript, or a directory as `transcriptPath` | exit 0, `{}`, no request, no state file; the host is unaffected |
+| Malformed JSON line | the bad line is skipped and later valid records are still captured |
+| Large payload | a 200 KB tool result and a 30 KB text turn are sent verbatim |
+
+Limit: structured `parts` are **not** truncated by `captureMaxLength` (default 24,000); that
+cap applies only to the text-only fallback. The parts shape exists so a long autonomous run
+is stored as tool parts instead of being cut at 24,000 chars (§8). Truncation is the server's
+call.
+
+Ops note: hook state and the pending queue default to `~/.openviking/…` and ignore
+`OPENVIKING_HOME` (`OPENVIKING_PENDING_DIR` overrides the queue only), so repeated probes must
+use a unique `conversationId` or the second run legitimately sends nothing.
+
 ## 11. Acceptance (installed plugin)
 
 The `antigravity` bundle 0.5.30, installed by `install.sh --harness antigravity --source dev`
