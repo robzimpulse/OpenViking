@@ -592,7 +592,7 @@ antigravity_config_dir() {
 }
 
 antigravity_plugin_dir() {
-  printf '%s' "$(antigravity_config_dir)/plugins/openviking-memory"
+  printf '%s' "${ANTIGRAVITY_PLUGINS_DIR:-$(antigravity_config_dir)/plugins}/openviking-memory"
 }
 
 refresh_available_harnesses() {
@@ -2952,71 +2952,57 @@ install_zcode() {
   info "$(t 'ZCode MCP installed:' 'ZCode MCP 已安装：') $config_path (mcp.servers)"
 }
 
-# Antigravity loads plugins from directories, each a plugin.json and a
-# hooks.json whose top-level keys name the hooks. The directory is the
-# installer's alone, so it is written whole instead of merged into user files.
+# Install the Antigravity native plugin bundle into $(antigravity_plugin_dir)
+# (~/.gemini/config/plugins/openviking-memory, or $ANTIGRAVITY_PLUGINS_DIR/openviking-memory).
+# Purpose: Assembles a self-contained Antigravity plugin bundle with hooks, MCP config,
+# skills, dispatcher, and shared runtime dependency closure. Hook commands are relative
+# because Antigravity runs them with cwd = plugin root.
+# Usage: Called by install.sh when 'antigravity' is among SELECTED_HARNESSES.
 install_antigravity() {
   step_heading "$(t 'Antigravity integration' 'Antigravity 集成')"
-  local root plugin_dir lib
+  local bundle root config host_module target_dir lib
   ensure_bundle
-  root="$(assemble_agent_integration antigravity antigravity)" || return 1
-  plugin_dir="$(antigravity_plugin_dir)"
+  target_dir="$(antigravity_plugin_dir)"
   lib="$(require_install_lib_dir)" || return 1
-  "$NODE_BIN" --input-type=module - "$root" "$plugin_dir" "$NODE_BIN" "$SOURCE_MODE" "$lib/host-json-config.mjs" <<'NODE' || return 1
+  # A directory of the same name that this installer did not write stays put.
+  if [ -d "$target_dir" ] && ! "$NODE_BIN" --input-type=module - "$target_dir/hooks.json" "$lib/host-json-config.mjs" <<'NODE'
 import fs from "node:fs";
-import path from "node:path";
 import { pathToFileURL } from "node:url";
-const [root, pluginDir, nodeBin, sourceMode, helper] = process.argv.slice(2);
+const [hooksPath, helper] = process.argv.slice(2);
 const { readJson, ownsHook } = await import(pathToFileURL(helper).href);
-const hostDir = path.join(root, "hosts", "antigravity");
-const version = readJson(path.join(root, "plugin.json")).version;
-const existing = path.join(pluginDir, "hooks.json");
-// A directory of the same name that this installer did not write stays put.
-if (fs.existsSync(pluginDir) && !(fs.existsSync(existing) && ownsHook(readJson(existing)))) {
-  process.stderr.write(`${pluginDir} exists and is not an OpenViking plugin; move it aside and re-run.\n`);
-  process.exit(1);
-}
-const quote = (value) => `'${String(value).replace(/'/g, `'"'"'`)}'`;
-const env = `OPENVIKING_INTEGRATION_ID='openviking-memory' OPENVIKING_INTEGRATION_VERSION=${quote(version)} OPENVIKING_HOOK_SOURCE='antigravity'`;
-const render = (command) => {
-  const match = /^node\s+__OPENVIKING_PLUGIN_ROOT__\/(\S+)(\s.*)?$/u.exec(command);
-  if (!match) throw new Error(`Unsupported Antigravity hook command template: ${command}`);
-  const args = (match[2] || "").replaceAll("__OPENVIKING_CLIENT_ID__", "antigravity");
-  return `${env} ${quote(nodeBin)} ${quote(path.join(root, match[1]))}${args} # openviking-memory`;
-};
-const template = readJson(path.join(hostDir, "hooks.json"));
-const hooks = Object.fromEntries(Object.entries(template).map(([name, events]) => [name,
-  Object.fromEntries(Object.entries(events).map(([event, handlers]) => [event,
-    handlers.map((handler) => ({ ...handler, command: render(handler.command) }))])),
-]));
-// Stage beside plugins/, not in it, so an interrupted run leaves no second
-// plugin for Antigravity to load; the config directory keeps the rename on
-// one filesystem.
-const tmp = path.join(path.dirname(path.dirname(pluginDir)), `.openviking-memory.${process.pid}.tmp`);
-fs.rmSync(tmp, { recursive: true, force: true });
-fs.mkdirSync(tmp, { recursive: true });
-fs.copyFileSync(path.join(hostDir, "plugin.json"), path.join(tmp, "plugin.json"));
-fs.writeFileSync(path.join(tmp, "hooks.json"), JSON.stringify(hooks, null, 2) + "\n", { mode: 0o600 });
-fs.rmSync(pluginDir, { recursive: true, force: true });
-fs.mkdirSync(path.dirname(pluginDir), { recursive: true });
-fs.renameSync(tmp, pluginDir);
-const manifestPath = path.join(root, "integration.json");
-const previous = fs.existsSync(manifestPath) ? readJson(manifestPath) : {};
-const now = new Date().toISOString();
-fs.writeFileSync(manifestPath, JSON.stringify({
-  schemaVersion: 1,
-  id: "openviking-memory",
-  version,
-  client: "antigravity",
-  installMode: "managed-native",
-  source: sourceMode,
-  capabilities: ["hooks"],
-  hooksConfig: path.join(pluginDir, "hooks.json"),
-  installedAt: previous.installedAt || now,
-  updatedAt: now,
-}, null, 2) + "\n");
+process.exit(fs.existsSync(hooksPath) && ownsHook(readJson(hooksPath)) ? 0 : 1);
 NODE
-  info "$(t 'Antigravity plugin installed:' 'Antigravity 插件已安装：') $plugin_dir"
+  then
+    err "$target_dir $(t 'exists and is not an OpenViking plugin; move it aside and re-run.' '已存在且不是 OpenViking 插件；请移走后重新运行。')"
+    return 1
+  fi
+  bundle="$OV_HOME/agent-integrations/antigravity-bundle.$$"
+  rm -rf "$bundle"
+  mkdir -p "$bundle"
+  root="$(assemble_agent_integration antigravity antigravity "$bundle")" || { rm -rf "$bundle"; return 1; }
+  rm -rf "$root/tests"
+  rm -f "$root/README.md" "$root/README_CN.md" "$root/DESIGN.md" "$root/plugin.json"
+  config="$bundle/antigravity-config"
+  cp -R "$root/hosts/antigravity" "$config" || { rm -rf "$bundle"; return 1; }
+  cp "$config/runtime-index.mjs" "$root/hosts/index.mjs" || { rm -rf "$bundle"; return 1; }
+  for host_module in "$root"/hosts/*.mjs; do
+    case "$(basename "$host_module")" in
+      index.mjs|incremental-turn-capture.mjs|antigravity.mjs|antigravity-turns.mjs) ;;
+      *) rm -f "$host_module" ;;
+    esac
+  done
+  rm -rf "$root/hosts/antigravity"
+  # Flatten config into the layout Antigravity reads at the plugin root.
+  cp "$config/plugin.json" "$bundle/plugin.json" || { rm -rf "$bundle"; return 1; }
+  cp "$config/hooks.json" "$bundle/hooks.json" || { rm -rf "$bundle"; return 1; }
+  cp "$config/mcp_config.json" "$bundle/mcp_config.json" || { rm -rf "$bundle"; return 1; }
+  cp -R "$config/skills" "$bundle/skills" || { rm -rf "$bundle"; return 1; }
+  rm -rf "$config"
+  mkdir -p "$(dirname "$target_dir")"
+  rm -rf "$target_dir"
+  mv "$bundle" "$target_dir" || { rm -rf "$bundle"; return 1; }
+  info "$(t 'Antigravity plugin installed:' 'Antigravity 插件已安装：') $target_dir"
+  info "$(t 'Please restart the Antigravity App to load the plugin.' '请重启 Antigravity App 以加载插件。')"
 }
 
 install_kimicode() {
@@ -3478,23 +3464,15 @@ EOF
     fi
   fi
   if contains_harness antigravity; then
-    local ag_root="$OV_HOME/agent-integrations/antigravity" ag_hooks ag_command
-    ag_hooks="$(antigravity_plugin_dir)/hooks.json"
-    # The rendered command shell-quotes its paths, so it is checked by running
-    # it the way Antigravity does, not by searching for the raw path.
-    ag_command="$("$NODE_BIN" -e '
-const hook = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))["openviking-memory"];
-const command = hook?.SessionStart?.[0]?.command;
-if (typeof command !== "string" || !command.includes("OPENVIKING_INTEGRATION_ID=")) process.exit(1);
-process.stdout.write(command);
-' "$ag_hooks" 2>/dev/null)" || ag_command=""
-    if [ -f "$(antigravity_plugin_dir)/plugin.json" ] \
+    # The bundle is self-contained: hooks run relative to the plugin root.
+    local ag_dir ag_root
+    ag_dir="$(antigravity_plugin_dir)"
+    ag_root="$ag_dir/agent-integrations/antigravity"
+    if [ -f "$ag_dir/plugin.json" ] && [ -f "$ag_dir/hooks.json" ] \
       && [ -f "$ag_root/scripts/hook.mjs" ] \
-      && [ -f "$ag_root/integration.json" ] \
-      && [ -f "$OV_HOME/agent-integrations/memory-plugin-shared/lib/agent-hook-runtime.mjs" ] \
-      && [ -n "$ag_command" ]; then
+      && [ -f "$ag_dir/agent-integrations/memory-plugin-shared/lib/agent-hook-runtime.mjs" ]; then
       "$NODE_BIN" --check "$ag_root/scripts/hook.mjs" || { ok=0; agent_fatal=1; }
-      if ! printf '%s' '{}' | OPENVIKING_MEMORY_ENABLED=0 sh -c "$ag_command" >/dev/null; then
+      if ! (cd "$ag_dir" && printf '%s' '{}' | OPENVIKING_MEMORY_ENABLED=0 "$NODE_BIN" ./agent-integrations/antigravity/scripts/hook.mjs session-start antigravity >/dev/null); then
         warn "antigravity: $(t 'installed Hook runtime failed its smoke test' '已安装的 Hook 运行时 smoke test 失败')"
         ok=0; agent_fatal=1
       else
@@ -3808,9 +3786,9 @@ EOF
     plan_paths ZCode "$HOME/.zcode/cli/config.json" "$HOME/.zcode/hooks.json" "$(zcode_mcp_path)" "$OV_HOME/agent-integrations/zcode"
   fi
   if contains_harness antigravity; then
-    plan_paths Antigravity "$(antigravity_plugin_dir)" "$OV_HOME/agent-integrations/antigravity"
+    plan_paths Antigravity "$(antigravity_plugin_dir)"
   fi
-  if contains_harness cursor || contains_harness trae || contains_harness trae-cn || contains_harness zcode || contains_harness antigravity; then
+  if contains_harness cursor || contains_harness trae || contains_harness trae-cn || contains_harness zcode; then
     plan_paths "$(t 'Shared hook runtime' '共享 hook 运行时')" "$OV_HOME/agent-integrations/memory-plugin-shared"
   fi
   if contains_harness kimicode; then
@@ -3960,7 +3938,7 @@ EOF
     next_steps "Kimi Code" "$(t 'start a new session (not /reload)' '新建会话（不要用 /reload）')" "$rerun" "" "$uninstall kimicode"
   fi
   if contains_harness antigravity; then
-    next_steps Antigravity "$(t 'start a new conversation in the Antigravity app or agy' '在 Antigravity app 或 agy 中新开一个对话')" "$rerun" "" "$uninstall antigravity"
+    next_steps Antigravity "$(t 'restart the Antigravity App' '重启 Antigravity App')" "$rerun" "" "$uninstall antigravity"
   fi
   if contains_harness codebuddy; then
     next_steps "CodeBuddy Code" "$(t 'run /reload-plugins or start a new session' '运行 /reload-plugins 或新建会话')" "$rerun" "" "$uninstall codebuddy"

@@ -33,7 +33,7 @@ The memory logic itself is not here: recall, batching, the pending queue, creden
 - **TRAE / TRAE CN** — capture reads `prompt`, `text_content` and `last_assistant_message` off the Stop event rather than parsing a transcript. Every Stop that carries content commits. Sessions are `tr-` and `trcn-`. See the [TRAE guide](../../docs/en/agent-integrations/13-trae.md).
 - **ZCode** — the rollout file is the authoritative incremental transcript: stable host `turnId` values drive deduplication and let a later Stop recover missed turns, and hook stdin is only the fallback. ZCode supports neither `PreCompact` nor `SessionEnd`, so committing on every Stop stands in for both. Its output schema is strict, so a pass-through writes nothing at all. Sessions are `zc-`. [DESIGN.md](./DESIGN.md) records the verified extension surface.
 - **Kimi Code** — `wire.jsonl` is the authoritative transcript. UserPromptSubmit emits raw context text, while Stop, PreCompact and SessionEnd may detach; Interrupt remains synchronous under a two-second OpenViking request budget. The installer creates a self-contained native plugin without editing legacy `config.toml` or `mcp.json`. Sessions are `kc-`. [Host contract](./hosts/kimicode/DESIGN.md).
-- **Antigravity** — the desktop app and the `agy` CLI read the same plugin under `~/.gemini/config/plugins/`. Antigravity runs PreInvocation before every model call, so recall runs only on a turn's first call (`invocationNum` 0), and context returns as an `injectSteps` system message. Stop carries no text: capture reads finished steps of `transcriptPath` after the last captured step, in a detached worker, and commits. Sessions are `ag-`. Install with `--harness antigravity`, which writes that plugin directory and leaves one it did not write in place; see the [community plugins guide](../../docs/en/agent-integrations/08-community-plugins.md#antigravity-memory-integration).
+- **Google Antigravity** — four hooks. `SessionStart` injects the user profile as a persistent system message and replays offline writes; `PreInvocation` recalls once per turn (`invocationNum === 0`); `PreToolUse` guards `viking://` URIs with explicit allow/deny decisions; `Stop` incrementally captures turns from `transcript_full.jsonl`, tool calls with their outputs and errors included, and commits after every `Stop` that captured something in a detached worker. The installer creates a self-contained native plugin under `~/.gemini/config/plugins/openviking-memory`. Sessions are `ag-`. [Host contract](./hosts/antigravity/DESIGN.md).
 
 Cursor tool capture follows the [Hooks contract](https://cursor.com/docs/hooks) and the MCP executor in [`@cursor/sdk` 1.0.38](https://registry.npmjs.org/@cursor/sdk/-/sdk-1.0.38.tgz), which supplies `tool_use_id` on `afterMCPExecution`. Older events without that native identity retain text capture only; the adapter does not invent call IDs or completion evidence.
 
@@ -47,6 +47,12 @@ For Kimi's managed plugin, use its installed path instead:
 
 ```bash
 node "${KIMI_CODE_HOME:-$HOME/.kimi-code}/plugins/managed/openviking-memory/agent-integrations/kimicode/scripts/ov-memory-doctor.mjs" kimicode --offline
+```
+
+For Antigravity's native plugin:
+
+```bash
+node "${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/openviking-memory/agent-integrations/antigravity/scripts/ov-memory-doctor.mjs" antigravity --offline
 ```
 
 For config-driven copies, the client defaults to the one that copy was installed for; pass `cursor`, `trae`, `trae-cn` or `zcode` as an argument to override it. Drop `--offline` to probe the server as well, and add `--json` for a machine-readable report.

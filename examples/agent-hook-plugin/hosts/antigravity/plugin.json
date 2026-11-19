@@ -1,7 +1,21 @@
 {
   "name": "openviking-memory",
   "displayName": "OpenViking Memory",
-  "description": "Long-term memory for Antigravity, powered by OpenViking: recall before the first model call of each turn and capture each finished turn.",
-  "author": { "name": "OpenViking", "url": "https://github.com/volcengine/OpenViking" },
-  "license": "Apache-2.0"
+  "version": "0.5.34",
+  "description": "Long-term semantic memory for Google Antigravity, powered by OpenViking. Injects relevant context at session start and on each prompt, and captures the conversation back into OpenViking.",
+  "author": {
+    "name": "OpenViking",
+    "url": "https://github.com/volcengine/OpenViking"
+  },
+  "homepage": "https://openviking.ai",
+  "repository": "https://github.com/volcengine/OpenViking",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "openviking",
+    "semantic-search",
+    "long-term-memory",
+    "context-engine",
+    "antigravity"
+  ]
 }

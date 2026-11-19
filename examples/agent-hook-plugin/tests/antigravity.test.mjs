@@ -1,223 +1,371 @@
+/**
+ * Adapter tests for the Antigravity host: guard decisions, input normalization,
+ * prompt gating, injection envelopes, and transcript capture driven through the hook dispatcher.
+ *
+ * Purpose: Verifies Antigravity's PreToolUse allow/deny decisions, injectSteps envelopes,
+ * once-per-turn recall at invocationNum 0, cached recall block reuse on queued prompts,
+ * and reliable turn capture and commit on Stop.
+ * Usage: Run with `node --test examples/agent-hook-plugin/tests/antigravity.test.mjs`.
+ */
+
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { expectExit, runHookScript } from "../../memory-plugin-shared/testing/support.mjs";
-import { antigravityTranscriptPath, resolveAntigravityTurnStep } from "../hosts/antigravity.mjs";
+import {
+  expectExit,
+  readRequestBody,
+  runHookScript,
+  scrubOpenVikingEnv,
+  withMockOpenViking,
+  writeCredentialFiles,
+  writeJson,
+} from "../../memory-plugin-shared/testing/support.mjs";
+import { antigravity } from "../hosts/antigravity.mjs";
 
-const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const hookEntry = join(pluginRoot, "scripts", "hook.mjs");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const HOOK = join(ROOT, "scripts", "hook.mjs");
 
-// Step shapes as written by agy 1.5.x to .system_generated/logs/transcript_full.jsonl.
-const step = (index, fields) => `${JSON.stringify({ step_index: index, status: "DONE", ...fields })}\n`;
-const firstTurn = step(0, {
-  source: "USER_EXPLICIT",
-  type: "USER_INPUT",
-  content: "<USER_REQUEST>\nWhat is the retry budget?\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nlocal time\n</ADDITIONAL_METADATA>",
-})
-  + step(1, { source: "SYSTEM_SDK", type: "SYSTEM_MESSAGE", content: "<openviking-context>old</openviking-context>" })
-  + step(2, { source: "MODEL", type: "PLANNER_RESPONSE", tool_calls: [{ name: "run_command" }] })
-  + step(3, { source: "MODEL", type: "GENERIC", content: "Command output: 3" })
-  + step(4, { source: "MODEL", type: "PLANNER_RESPONSE", content: "The retry budget is three attempts." });
+// ---------------------------------------------------------------------------
+// Guard and envelope tests
+// ---------------------------------------------------------------------------
 
-async function runHook(event, input, env) {
-  const run = expectExit(await runHookScript(hookEntry, { argv: [event, "antigravity"], input, env }));
-  return JSON.parse(run.stdout.trim() || "{}");
-}
+test("pre-tool-use never answers {}", () => {
+  const allowCmd = antigravity.guard({
+    toolCall: { name: "run_command", args: { CommandLine: "ls" } },
+  });
+  assert.deepEqual(allowCmd, { decision: "allow" });
 
-test("Antigravity hooks.json uses named hooks with the dispatcher's event names", () => {
-  const hooks = JSON.parse(readFileSync(join(pluginRoot, "hosts", "antigravity", "hooks.json"), "utf8"));
-  const handlers = hooks["openviking-memory"];
-  assert.deepEqual(Object.keys(handlers), ["SessionStart", "PreInvocation", "Stop"]);
-  assert.match(handlers.PreInvocation[0].command, /hook\.mjs pre-invocation __OPENVIKING_CLIENT_ID__$/);
+  const allowEmpty = antigravity.guard({});
+  assert.deepEqual(allowEmpty, { decision: "allow" });
 });
 
-test("Antigravity recalls once per turn and captures only new transcript text", async () => {
-  const messages = [];
-  const commits = [];
-  const server = createServer((request, response) => {
-    let body = "";
-    request.on("data", (chunk) => { body += chunk; });
-    request.on("end", () => {
-      if (request.url === "/api/v1/search/search" || request.url === "/api/v1/search/recall") {
-        response.end(JSON.stringify({ result: { rendered: "antigravity memory", entries: [], stats: {} } }));
-      } else if (request.url?.includes("/messages")) {
-        const parsed = JSON.parse(body);
-        messages.push(...(parsed.messages ?? [parsed]));
-        response.end(JSON.stringify({ result: { ok: true } }));
-      } else {
-        if (request.url?.endsWith("/commit")) commits.push(request.url);
-        response.end(JSON.stringify({ result: { ok: true } }));
+test("read_file on a viking URI is denied", () => {
+  const res = antigravity.guard({
+    toolCall: { name: "read_file", args: { Path: "viking://~/memories/x.md" } },
+  });
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /OpenViking MCP read/);
+});
+
+test("envelopes use injectSteps", () => {
+  const pre = antigravity.envelope("pre-invocation", "B");
+  assert.deepEqual(pre, { injectSteps: [{ ephemeralMessage: "B" }] });
+
+  const start = antigravity.envelope("session-start", "P");
+  assert.deepEqual(start, {
+    injectSteps: [{ systemMessage: { systemMessage: "P" } }],
+  });
+
+  assert.deepEqual(antigravity.envelope("stop", ""), {});
+  assert.deepEqual(antigravity.envelope("pre-invocation", ""), {});
+});
+
+test("normalizeInput maps conversationId and sets no prompt event id", () => {
+  // Undo-and-resend rewinds initialNumSteps, so an id built from it would mark the
+  // re-sent message as a duplicate event and skip its recall.
+  const norm = antigravity.normalizeInput({ conversationId: "c", initialNumSteps: 5 });
+  assert.equal(norm.session_id, "c");
+  assert.equal(norm.prompt_id, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Hook dispatcher tests with mock server
+// ---------------------------------------------------------------------------
+
+/** Wait past the dispatcher's 500 ms same-prompt duplicate window, as a real next turn does. */
+const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 600));
+
+async function createSandbox(prefix = "ov-ag-test-") {
+  const files = await writeCredentialFiles(prefix, {
+    ovcli: { url: "http://127.0.0.1:1", api_key: "k" },
+    ov: {},
+  });
+  return {
+    files,
+    env: {
+      OPENVIKING_MEMORY_ENABLED: "1",
+      OPENVIKING_WRITE_PATH_ASYNC: "0",
+      OPENVIKING_HOOK_STATE_DIR: join(files.dir, "hook-state"),
+      OPENVIKING_PENDING_DIR: join(files.dir, "pending"),
+      OPENVIKING_STATE_DIR: join(files.dir, "state"),
+    },
+  };
+}
+
+test("pre-invocation injects only at invocation 0 and cached block is reused", async () => {
+  const restoreEnv = scrubOpenVikingEnv();
+  const box = await createSandbox("ov-ag-pre-inv-");
+  let searchCalls = 0;
+
+  try {
+    await withMockOpenViking(async (req, res) => {
+      const { pathname } = new URL(req.url, "http://127.0.0.1");
+      if (pathname.endsWith("/search/search") || pathname.endsWith("/search/find")) {
+        searchCalls++;
+        return writeJson(res, {
+          status: "ok",
+          result: {
+            rendered: "recalled content",
+            entries: [{ uri: "viking://~/memories/1.md", text: "recalled content" }],
+          },
+        });
+      }
+      return writeJson(res, { status: "ok" });
+    }, async (url) => {
+      const files = await writeCredentialFiles("ov-ag-pre-inv-url-", {
+        ovcli: { url, api_key: "k" },
+        ov: {},
+      });
+      try {
+        const baseInput = {
+          conversationId: "conv-1",
+          workspacePaths: [box.files.dir],
+        };
+
+        // 1. Invocation 0 -> should recall and inject ephemeralMessage
+        const r0 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            lastUserInput: "q",
+            initialNumSteps: 1,
+            invocationNum: 0,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r0, 0);
+        const out0 = JSON.parse(r0.stdout.trim());
+        assert.ok(out0.injectSteps?.[0]?.ephemeralMessage, "stdout has ephemeralMessage");
+        const searchAfter0 = searchCalls;
+        assert.ok(searchAfter0 >= 1, "mock saw search request");
+
+        // 2. Invocation 1 -> prompt() returns "", should return {} and no new search
+        const r1 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            lastUserInput: "q",
+            initialNumSteps: 3,
+            invocationNum: 1,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r1, 0);
+        assert.deepEqual(JSON.parse(r1.stdout.trim()), {});
+        assert.equal(searchCalls, searchAfter0, "mock saw no search request during invocation 1");
+
+        // 3. Next turn with same lastUserInput (queued message) -> reuses cached block without search.
+        //    A real turn lasts at least one model call, so the next turn starts well outside the
+        //    dispatcher's 500 ms same-prompt duplicate window; wait past it.
+        await nextTurn();
+        const r2 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            lastUserInput: "q",
+            initialNumSteps: 6,
+            invocationNum: 0,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r2, 0);
+        const out2 = JSON.parse(r2.stdout.trim());
+        assert.deepEqual(out2, out0, "reuses the cached ephemeralMessage block");
+        assert.equal(searchCalls, searchAfter0, "mock saw no search request during cached replay");
+
+        // 4. Pre-invocation without lastUserInput -> silent {}
+        const r3 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            initialNumSteps: 7,
+            invocationNum: 0,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r3, 0);
+        assert.deepEqual(JSON.parse(r3.stdout.trim()), {});
+        assert.equal(searchCalls, searchAfter0, "mock saw no search request without lastUserInput");
+
+        // 5. Undo-and-resend: the re-sent message replays the rewound initialNumSteps (6)
+        //    at invocation 0 and must still get its recall block.
+        await nextTurn();
+        const r4 = await runHookScript(HOOK, {
+          argv: ["pre-invocation", "antigravity"],
+          input: {
+            ...baseInput,
+            lastUserInput: "q",
+            initialNumSteps: 6,
+            invocationNum: 0,
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r4, 0);
+        assert.deepEqual(JSON.parse(r4.stdout.trim()), out0, "re-sent message after undo gets the recall block");
+      } finally {
+        await rmSync(files.dir, { recursive: true, force: true });
       }
     });
-  });
-  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-  const root = mkdtempSync(join(tmpdir(), "openviking-antigravity-hook-"));
-  const transcriptPath = join(root, "transcript_full.jsonl");
-  writeFileSync(transcriptPath, firstTurn);
-  const env = {
-    HOME: root,
-    OPENVIKING_URL: `http://127.0.0.1:${server.address().port}`,
-    OPENVIKING_HOOK_STATE_DIR: join(root, "state"),
-    OPENVIKING_MEMORY_ENABLED: "1",
-    OPENVIKING_WRITE_PATH_ASYNC: "0",
-  };
-  try {
-    const base = { conversationId: "conv-1", cwd: "/workspace", transcriptPath };
-    const call = (invocationNum, initialNumSteps) => ({
-      ...base, invocationNum, initialNumSteps, lastUserInput: "What is the retry budget?",
-    });
-    const recalled = await Promise.all([
-      runHook("pre-invocation", call(0, 1), env),
-      runHook("pre-invocation", call(0, 1), env),
-      runHook("pre-invocation", call(1, 3), env),
-    ]);
-    const injected = recalled.filter((output) => /antigravity memory/.test(
-      output.injectSteps?.[0]?.systemMessage?.systemMessage || "",
-    ));
-    assert.equal(injected.length, 1, "only the first model call of a turn recalls");
-    assert.ok(recalled.every((output) => output.injectSteps || Object.keys(output).length === 0));
-
-    // Even before any MODEL step runs (e.g. only SessionStart SYSTEM_SDK is
-    // on disk and initialNumSteps moved), the turn key stays on step 0.
-    assert.deepEqual(await runHook("pre-invocation", call(0, 2), env), {});
-
-    // A background task, subagent message, or Stop continuation starts a new
-    // invocation (`invocationNum` 0) with a higher `initialNumSteps` while
-    // `lastUserInput` still holds the earlier prompt. Because the earlier
-    // `systemMessage` stays in the trajectory, wakeups must not inject it again.
-    assert.deepEqual(await runHook("pre-invocation", call(0, 5), env), {});
-    appendFileSync(transcriptPath, step(5, {
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: "[Message] sender=conv-1/task-1 Task completed",
-    }));
-    assert.deepEqual(await runHook("pre-invocation", call(0, 6), env), {});
-
-    await runHook("stop", base, env);
-    assert.deepEqual(messages.map((message) => [message.role, message.parts?.[0]?.text ?? message.content]), [
-      ["user", "What is the retry budget?"],
-      ["assistant", "The retry budget is three attempts."],
-    ]);
-    assert.equal(commits.length, 1);
-    assert.ok(commits[0].includes("ag-conv-1"));
-
-    // A second Stop sends only steps written since the first one. Replies that
-    // quote the host's request envelope keep their text.
-    const quoted = "The transcript wraps your prompt like this:\n<USER_REQUEST>your prompt</USER_REQUEST>\nKeep metadata separate.";
-    const template = "An empty template:\n```\n<USER_REQUEST></USER_REQUEST>\n```";
-    appendFileSync(transcriptPath, step(6, { source: "USER_EXPLICIT", type: "USER_INPUT", content: "<USER_REQUEST>\nHow is my prompt wrapped?\n</USER_REQUEST>" }));
-    const secondRecall = await runHook("pre-invocation", {
-      ...base, invocationNum: 0, initialNumSteps: 7, lastUserInput: "How is my prompt wrapped?",
-    }, env);
-    assert.match(secondRecall.injectSteps?.[0]?.systemMessage?.systemMessage || "", /antigravity memory/);
-
-    // Backgrounded commands (`GENERIC` with `RUNNING`) and failed/invalid tool
-    // steps stay non-DONE permanently in Antigravity transcripts, and a
-    // canceled/errored reply will never become DONE; neither may freeze the
-    // capture cursor before later finished replies. An in-flight reply at the
-    // tail (`RUNNING` / `GENERATING`) still waits for the next Stop.
-    appendFileSync(transcriptPath, step(7, { source: "MODEL", type: "GENERIC", content: "Tool is running as a background task", status: "RUNNING" })
-      + step(8, { source: "MODEL", type: "GENERIC", content: "Encountered error", status: "ERROR" })
-      + step(9, { source: "MODEL", type: "GENERIC", content: "Invalid tool call", status: "INVALID" })
-      + step(10, { source: "MODEL", type: "PLANNER_RESPONSE", content: "Aborted draft.", status: "CANCELED" })
-      + step(11, { source: "MODEL", type: "PLANNER_RESPONSE", content: quoted })
-      + step(12, { source: "MODEL", type: "PLANNER_RESPONSE", content: template })
-      + step(13, { source: "MODEL", type: "PLANNER_RESPONSE", content: "Thirty seconds.", status: "RUNNING" }));
-    assert.deepEqual(await runHook("pre-invocation", {
-      ...base, invocationNum: 0, initialNumSteps: 13, lastUserInput: "How is my prompt wrapped?",
-    }, env), {});
-    await runHook("stop", base, env);
-    assert.deepEqual(messages.slice(2).map((message) => message.parts?.[0]?.text ?? message.content), [
-      "How is my prompt wrapped?",
-      quoted,
-      template,
-    ]);
-    writeFileSync(
-      transcriptPath,
-      readFileSync(transcriptPath, "utf8").replace('{"step_index":13,"status":"RUNNING"', '{"step_index":13,"status":"DONE"'),
-    );
-    await runHook("stop", base, env);
-    assert.deepEqual(messages.slice(5).map((message) => message.parts?.[0]?.text ?? message.content), [
-      "Thirty seconds.",
-    ]);
-
-    // A queued user turn that the model already answered without an initial
-    // recall must not recall late on a background wakeup, while a genuine
-    // repeated prompt in a new USER_INPUT step still gets its turn injection.
-    const latePath = join(root, "late_transcript.jsonl");
-    writeFileSync(latePath, step(0, { source: "USER_EXPLICIT", type: "USER_INPUT", content: "<USER_REQUEST>\nContinue\n</USER_REQUEST>" })
-      + step(1, { source: "MODEL", type: "PLANNER_RESPONSE", content: "Done." }));
-    const lateBase = { conversationId: "conv-2", cwd: "/workspace", transcriptPath: latePath };
-    assert.deepEqual(await runHook("pre-invocation", {
-      ...lateBase, invocationNum: 0, initialNumSteps: 2, lastUserInput: "Continue",
-    }, env), {});
-    appendFileSync(latePath, step(2, { source: "USER_EXPLICIT", type: "USER_INPUT", content: "<USER_REQUEST>\nContinue\n</USER_REQUEST>" }));
-    const firstContinue = await runHook("pre-invocation", {
-      ...lateBase, invocationNum: 0, initialNumSteps: 3, lastUserInput: "Continue",
-    }, env);
-    assert.match(firstContinue.injectSteps?.[0]?.systemMessage?.systemMessage || "", /antigravity memory/);
-    appendFileSync(latePath, step(3, { source: "MODEL", type: "PLANNER_RESPONSE", content: "Done again." })
-      + step(4, { source: "USER_EXPLICIT", type: "USER_INPUT", content: "<USER_REQUEST>\nContinue\n</USER_REQUEST>" }));
-    const secondContinue = await runHook("pre-invocation", {
-      ...lateBase, invocationNum: 0, initialNumSteps: 5, lastUserInput: "Continue",
-    }, env);
-    assert.match(secondContinue.injectSteps?.[0]?.systemMessage?.systemMessage || "", /antigravity memory/);
-
-    // Missing transcript falls back to initialNumSteps without failing recall.
-    const noTranscript = await runHook("pre-invocation", {
-      conversationId: "conv-3",
-      cwd: "/workspace",
-      transcriptPath: join(root, "missing.jsonl"),
-      invocationNum: 0,
-      initialNumSteps: 1,
-      lastUserInput: "Fallback prompt",
-    }, env);
-    assert.match(noTranscript.injectSteps?.[0]?.systemMessage?.systemMessage || "", /antigravity memory/);
   } finally {
-    server.close();
-    rmSync(root, { recursive: true, force: true });
+    restoreEnv();
+    await rmSync(box.files.dir, { recursive: true, force: true });
   }
 });
 
-test("Antigravity treats an input the transcript has not recorded yet as a new turn", () => {
-  // The previous turn is answered; the new turn's USER_INPUT step is not on disk.
-  assert.equal(resolveAntigravityTurnStep(firstTurn, 5, "What is the retry budget?"), null);
-  assert.equal(resolveAntigravityTurnStep(firstTurn, 5, "  What is the\nretry budget?  "), null);
-  assert.equal(resolveAntigravityTurnStep(firstTurn, 5, "And the timeout?"), undefined);
-  assert.equal(resolveAntigravityTurnStep(firstTurn, 5), null);
+test("stop captures user, assistant and tool turns, then commits", async () => {
+  const restoreEnv = scrubOpenVikingEnv();
+  const box = await createSandbox("ov-ag-stop-");
+  const transcriptPath = join(box.files.dir, "transcript_full.jsonl");
 
-  // transcript.jsonl keeps only the head and tail of a long record, which can
-  // not be compared with the input, so it stays a wakeup.
-  const truncated = step(0, {
-    source: "USER_EXPLICIT",
-    type: "USER_INPUT",
-    content: "<USER_REQUEST>\nWhat is the …",
-    truncated_fields: ["content"],
-  }) + step(1, { source: "MODEL", type: "PLANNER_RESPONSE", content: "Three." });
-  assert.equal(resolveAntigravityTurnStep(truncated, 2, "What is the retry budget?"), null);
+  const records = [
+    {
+      step_index: 0,
+      source: "USER_EXPLICIT",
+      type: "USER_INPUT",
+      content: "<USER_REQUEST>Search and run</USER_REQUEST>",
+    },
+    {
+      step_index: 1,
+      source: "MODEL",
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "call_mcp_tool",
+          args: {
+            ServerName: "openviking-memory_openviking",
+            ToolName: "search",
+            Arguments: { query: "x" },
+          },
+        },
+      ],
+    },
+    {
+      step_index: 2,
+      source: "MODEL",
+      type: "GENERIC",
+      content: "MCP search result text",
+      status: "COMPLETED",
+    },
+    {
+      step_index: 3,
+      source: "MODEL",
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "run_command",
+          args: { CommandLine: "long running process" },
+        },
+      ],
+    },
+    {
+      step_index: 4,
+      source: "MODEL",
+      type: "GENERIC",
+      content: "Tool is running as a background task with task id 123",
+      status: "RUNNING",
+    },
+  ];
+  writeFileSync(transcriptPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
 
-  // Only the SessionStart steps are on disk before the first turn is written.
-  const startOnly = step(0, { source: "SYSTEM_SDK", type: "SYSTEM_MESSAGE", content: "<openviking-context>start</openviking-context>" });
-  assert.equal(resolveAntigravityTurnStep(startOnly, 1, "First prompt"), undefined);
-});
+  const seen = { batches: [], commit: 0, sessions: [] };
 
-test("Antigravity reads transcript_full.jsonl in place of the truncated transcript", () => {
-  const root = mkdtempSync(join(tmpdir(), "openviking-antigravity-transcript-"));
   try {
-    const short = join(root, "transcript.jsonl");
-    writeFileSync(short, "");
-    assert.equal(antigravityTranscriptPath(short), short);
-    writeFileSync(join(root, "transcript_full.jsonl"), "");
-    assert.equal(antigravityTranscriptPath(short), join(root, "transcript_full.jsonl"));
-    const other = join(root, "late_transcript.jsonl");
-    assert.equal(antigravityTranscriptPath(other), other);
-    assert.equal(antigravityTranscriptPath(undefined), "");
+    await withMockOpenViking(async (req, res) => {
+      const { pathname } = new URL(req.url, "http://127.0.0.1");
+      if (pathname.includes("/messages")) {
+        const body = await readRequestBody(req);
+        seen.batches.push(body);
+        const match = pathname.match(/\/sessions\/([^/]+)\//);
+        if (match) seen.sessions.push(match[1]);
+        return writeJson(res, { status: "ok", data: { added: 2 } });
+      }
+      if (pathname.endsWith("/commit")) {
+        seen.commit++;
+        return writeJson(res, { status: "ok", trace_id: "t" });
+      }
+      return writeJson(res, { status: "ok" });
+    }, async (url) => {
+      const files = await writeCredentialFiles("ov-ag-stop-url-", {
+        ovcli: { url, api_key: "k" },
+        ov: {},
+      });
+      try {
+        const stopInput = {
+          conversationId: "c-stop-1",
+          transcriptPath,
+          workspacePaths: [box.files.dir],
+        };
+
+        // First Stop
+        const r1 = await runHookScript(HOOK, {
+          argv: ["stop", "antigravity"],
+          input: stopInput,
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r1, 0);
+
+        assert.equal(seen.batches.length, 1);
+        assert.equal(seen.commit, 1);
+        assert.ok(seen.sessions.every((s) => s.startsWith("ag-")));
+        const msgs = seen.batches[0].messages;
+        assert.deepEqual(msgs.map((m) => m.role), ["user", "assistant", "assistant"]);
+        // Tool activity goes on the wire as structured parts (rendered as tool
+        // cards), not flattened into one text blob.
+        const toolParts = msgs.flatMap((m) => m.parts || []).filter((p) => p.type === "tool");
+        assert.deepEqual(
+          toolParts.map((p) => [p.tool_name, p.tool_status]),
+          [
+            ["call_mcp_tool", "running"],
+            ["call_mcp_tool", "completed"],
+            ["run_command", "running"],
+            ["run_command", "running"],
+          ],
+        );
+
+        // Second identical Stop -> capture with no new records returns null, no new requests
+        const r2 = await runHookScript(HOOK, {
+          argv: ["stop", "antigravity"],
+          input: stopInput,
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r2, 0);
+
+        assert.equal(seen.batches.length, 1, "no second message batch sent");
+        assert.equal(seen.commit, 1, "no second commit sent");
+
+        // Unreadable transcript does not advance state
+        const stateFile = join(box.env.OPENVIKING_HOOK_STATE_DIR, "antigravity", "c-stop-1.json");
+        const stateBefore = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : null;
+
+        const r3 = await runHookScript(HOOK, {
+          argv: ["stop", "antigravity"],
+          input: {
+            ...stopInput,
+            transcriptPath: "/nonexistent/path/transcript.jsonl",
+          },
+          cwd: box.files.dir,
+          env: { ...files.env, ...box.env },
+        });
+        expectExit(r3, 0);
+
+        const stateAfter = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : null;
+        assert.equal(stateAfter?.lastTurnId, stateBefore?.lastTurnId, "lastTurnId was not modified");
+      } finally {
+        await rmSync(files.dir, { recursive: true, force: true });
+      }
+    });
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    restoreEnv();
+    await rmSync(box.files.dir, { recursive: true, force: true });
   }
 });
