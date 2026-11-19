@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs session-start codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs\" session-start codebuddy",
             "timeout": 120
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs user-prompt-submit codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs\" user-prompt-submit codebuddy",
             "timeout": 60
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/uri-guard.mjs codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/uri-guard.mjs\" codebuddy",
             "timeout": 5
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs stop codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs\" stop codebuddy",
             "timeout": 45
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs pre-compact codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs\" pre-compact codebuddy",
             "timeout": 30
           }
         ]
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs session-end codebuddy",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/agent-integrations/codebuddy/scripts/hook.mjs\" session-end codebuddy",
             "timeout": 30
           }
         ]
