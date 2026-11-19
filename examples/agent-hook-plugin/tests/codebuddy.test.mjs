@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -365,5 +365,19 @@ test("a disabled plugin exits cleanly and touches the network not at all", async
   } finally {
     await rmSync(box.files.dir, { recursive: true, force: true });
     restoreEnv();
+  }
+});
+
+/**
+ * CodeBuddy substitutes ${CODEBUDDY_PLUGIN_ROOT} into the command text before the
+ * shell runs it, so a plugin root with spaces splits the script path unless the
+ * template quotes it (same bug class as volcengine/OpenViking#7761).
+ */
+test("CodeBuddy hook commands quote the plugin root", () => {
+  const { hooks } = JSON.parse(readFileSync(join(ROOT, "hosts", "codebuddy", "hooks.json"), "utf-8"));
+  const commands = Object.values(hooks).flat().flatMap((entry) => entry.hooks).map((hook) => hook.command);
+  assert.ok(commands.length > 0);
+  for (const command of commands) {
+    assert.match(command, /^node "\$\{CODEBUDDY_PLUGIN_ROOT\}\/[^"\s]+\.mjs"( |$)/u, command);
   }
 });

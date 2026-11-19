@@ -11,7 +11,7 @@ description: >
   user asks for the plugin's status. Triggers: "memory not working", "check
   OpenViking", "plugin status", "记忆没生效", "插件状态", "连不上 OpenViking",
   "recall 为空", "401".
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/ov-memory-doctor.mjs *)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/ov-memory-doctor.mjs" *)
 ---
 
 # OpenViking Memory Doctor
@@ -45,7 +45,7 @@ config validation, live embedding probe, native engine, disk — is
 ## Step 1 — run the doctor
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/scripts/ov-memory-doctor.mjs
+node "${CLAUDE_PLUGIN_ROOT}/scripts/ov-memory-doctor.mjs"
 ```
 
 Options: `--json` (machine-readable), `--offline` (skip network probes),
@@ -80,6 +80,7 @@ Work top-down; fix the first ✗ and rerun before chasing the next.
 | `marketplace 'openviking' … missing directory` / registered as a file | The checkout/archive moved, or a file-type marketplace (fails `marketplace update` with EISDIR) | `claude plugin marketplace remove openviking` then re-run the installer. |
 | `no skills/ directory in this plugin copy` / registered version behind the repo | Stale version-keyed cache; `claude plugin update` is a no-op when the version string did not change | `claude plugin marketplace update openviking && claude plugin uninstall openviking-memory@openviking && claude plugin install openviking-memory@openviking`. |
 | `legacy openviking hooks … settings.json` / extra plugin ids / user-scope MCP `openviking` | Pre-2.0 install residue; every hook fires twice, MCP server registered twice | Remove the openviking entries from `.hooks` in `~/.claude/settings.json` (back it up), `claude plugin uninstall <stale id>`, `claude mcp remove openviking -s user`. |
+| `hook commands leave a plugin root with spaces unquoted` | The plugin copy sits under a path with spaces (Claude desktop app: `~/Library/Application Support/...`) and its `hooks.json` predates the quoting fix; every hook dies with `Cannot find module …/Application` while config, connection and MCP look healthy | Update the plugin (`claude plugin marketplace update openviking && claude plugin uninstall openviking-memory@openviking && claude plugin install openviking-memory@openviking`), then restart the app. |
 | `node is not on PATH` / node < 18 | Hooks and `.mcp.json` run the bare command `node`; GUI/IDE launches often lack nvm/volta shims | Put node on PATH for the launching environment, or set `PATH` in the `env` block of `~/.claude/settings.json`. |
 | `server unreachable` (refused / dns / timeout / tls) | Wrong url/port, server down, DNS/VPN, private CA | Compare with `curl -sS <url>/health`. curl OK + doctor fails ⇒ proxy or CA issue (see Step 3). |
 | `base URL ends with /api/v1` or `/mcp`, no scheme, `GET /health → 404` | url shape wrong (paths are concatenated bare); Cloud needs the `/openviking` prefix | Fix `url` to the API root. |

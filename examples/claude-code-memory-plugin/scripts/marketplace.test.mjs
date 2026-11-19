@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,6 +77,62 @@ test("Claude .mcp.json starts the stdio MCP proxy", () => {
   execFileSync("node", ["--check", join(pluginDir, "servers", "mcp-proxy.mjs")], { stdio: "pipe" });
 });
 
+/**
+ * Regression for volcengine/OpenViking#7761: the Claude desktop app installs the
+ * plugin under "~/Library/Application Support/...", so every shell command that
+ * names ${CLAUDE_PLUGIN_ROOT} must quote it. Runs each hook through `sh` from a
+ * plugin root that contains spaces and brackets, both with the root left to the
+ * shell (env var) and substituted into the text first (as the host may do).
+ * Memory is disabled, so no hook contacts a server.
+ */
+test("Claude hook commands run from plugin roots containing spaces", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "ov-claude-hooks-"));
+  const pluginRoot = join(home, "Application Support [plugin]");
+  symlinkSync(pluginDir, pluginRoot, "dir");
+  const env = {
+    ...process.env,
+    HOME: home,
+    CLAUDE_PLUGIN_ROOT: pluginRoot,
+    OPENVIKING_HOME: join(home, ".openviking"),
+    OPENVIKING_CONFIG_FILE: join(home, "ov.conf"),
+    OPENVIKING_CLI_CONFIG_FILE: join(home, "ovcli.conf"),
+    OPENVIKING_MEMORY_ENABLED: "0",
+  };
+  try {
+    const { hooks } = readJson(join(pluginDir, "hooks", "hooks.json"));
+    for (const [event, entries] of Object.entries(hooks)) {
+      for (const { hooks: commands } of entries) {
+        for (const { command } of commands) {
+          const substituted = command.replaceAll("${CLAUDE_PLUGIN_ROOT}", pluginRoot);
+          for (const [mode, text] of [["env", command], ["substituted", substituted]]) {
+            await t.test(`${event} (${mode}): ${command}`, () => {
+              execFileSync("sh", ["-c", text], { input: "{}", stdio: ["pipe", "pipe", "pipe"], env });
+            });
+          }
+        }
+      }
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Every other place that hands ${CLAUDE_PLUGIN_ROOT} to a shell (the /ov slash
+ * command and the doctor skill's command and allowed-tools rule) must quote it
+ * too; .mcp.json is exempt because it passes the path as an argv element.
+ */
+test("Claude shell commands quote ${CLAUDE_PLUGIN_ROOT}", () => {
+  const files = ["hooks/hooks.json", "commands/ov.md", "skills/ov-memory-doctor/SKILL.md"];
+  for (const rel of files) {
+    const text = readFileSync(join(pluginDir, rel), "utf-8");
+    const unquoted = text.match(/(?<!")(?<!\\")\$\{CLAUDE_PLUGIN_ROOT\}[^\s"]*/gu) || [];
+    assert.deepEqual(unquoted, [], `${rel} has unquoted plugin-root paths`);
+  }
+});
+
 test("Claude hooks include optional skill experience PostToolUse Read hook", () => {
   const hooks = readJson(join(pluginDir, "hooks", "hooks.json"));
   const postToolUse = hooks.hooks?.PostToolUse;
@@ -84,7 +141,7 @@ test("Claude hooks include optional skill experience PostToolUse Read hook", () 
   assert.ok(readHook, "PostToolUse must include a Read matcher");
   assert.equal(
     readHook.hooks?.[0]?.command,
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/skill-experience.mjs",
+    'node "${CLAUDE_PLUGIN_ROOT}/scripts/skill-experience.mjs"',
   );
   execFileSync("node", ["--check", join(pluginDir, "scripts", "skill-experience.mjs")], { stdio: "pipe" });
 });
@@ -97,7 +154,7 @@ test("Claude hooks include PreToolUse URI guard for file and shell tools", () =>
   assert.ok(guardHook, "PreToolUse must guard Read|Glob|Grep|Edit|Write|Bash");
   assert.equal(
     guardHook.hooks?.[0]?.command,
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/uri-guard.mjs",
+    'node "${CLAUDE_PLUGIN_ROOT}/scripts/uri-guard.mjs"',
   );
   execFileSync("node", ["--check", join(pluginDir, "scripts", "uri-guard.mjs")], { stdio: "pipe" });
 });
@@ -105,8 +162,17 @@ test("Claude hooks include PreToolUse URI guard for file and shell tools", () =>
 test("Claude plugin ships the memory doctor skill and script", () => {
   const skill = join(pluginDir, "skills", "ov-memory-doctor", "SKILL.md");
   assert.ok(existsSync(skill), "missing skills/ov-memory-doctor/SKILL.md");
-  assert.match(readFileSync(skill, "utf-8"), /node \$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/ov-memory-doctor\.mjs/);
+  assert.match(readFileSync(skill, "utf-8"), /node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/ov-memory-doctor\.mjs"/);
   assert.ok(existsSync(join(pluginDir, "skills", "ov-memory-doctor", "reference.md")));
   execFileSync("node", ["--check", join(pluginDir, "scripts", "ov-memory-doctor.mjs")], { stdio: "pipe" });
   execFileSync("node", ["--check", join(pluginDir, "scripts", "shared", "doctor-core.mjs")], { stdio: "pipe" });
+});
+
+/** The doctor names the #7761 failure instead of reporting a healthy install. */
+test("doctor flags hook commands that leave the plugin root unquoted", async () => {
+  const { unquotedRootHookCommands } = await import("./ov-memory-doctor.mjs");
+  const legacy = { hooks: { Stop: [{ hooks: [{ command: "node ${CLAUDE_PLUGIN_ROOT}/scripts/auto-capture.mjs" }] }] } };
+  assert.deepEqual(unquotedRootHookCommands(legacy), ["node ${CLAUDE_PLUGIN_ROOT}/scripts/auto-capture.mjs"]);
+  assert.deepEqual(unquotedRootHookCommands(readJson(join(pluginDir, "hooks", "hooks.json"))), []);
+  assert.deepEqual(unquotedRootHookCommands(null), []);
 });
