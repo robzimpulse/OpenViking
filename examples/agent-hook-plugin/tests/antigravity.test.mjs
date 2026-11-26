@@ -4,7 +4,7 @@
  *
  * Purpose: Verifies Antigravity's PreToolUse allow/deny decisions, injectSteps envelopes,
  * once-per-turn recall at invocationNum 0, cached recall block reuse on queued prompts,
- * and reliable turn capture and commit on Stop.
+ * compaction checkpoint detection, and reliable turn capture and commit on Stop.
  * Usage: Run with `node --test examples/agent-hook-plugin/tests/antigravity.test.mjs`.
  */
 
@@ -23,7 +23,7 @@ import {
   writeCredentialFiles,
   writeJson,
 } from "../../memory-plugin-shared/testing/support.mjs";
-import { antigravity } from "../hosts/antigravity.mjs";
+import { antigravity, latestAntigravityCheckpoint } from "../hosts/antigravity.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(ROOT, "scripts", "hook.mjs");
@@ -61,6 +61,26 @@ test("envelopes use injectSteps", () => {
 
   assert.deepEqual(antigravity.envelope("stop", ""), {});
   assert.deepEqual(antigravity.envelope("pre-invocation", ""), {});
+});
+
+/** A profile re-sent after a compaction must outlive the turn, so it gets its own systemMessage. */
+test("a re-sent profile goes first as a systemMessage, recall stays ephemeral", () => {
+  const profile = '<openviking-context source="session-start">\nP\n</openviking-context>';
+  assert.deepEqual(antigravity.envelope("pre-invocation", `${profile}\n\nR`), {
+    injectSteps: [{ systemMessage: { systemMessage: profile } }, { ephemeralMessage: "R" }],
+  });
+  assert.deepEqual(antigravity.envelope("pre-invocation", profile), {
+    injectSteps: [{ systemMessage: { systemMessage: profile } }],
+  });
+});
+
+test("latestAntigravityCheckpoint reports the last SYSTEM CHECKPOINT step", () => {
+  const line = (step_index, source, type) => JSON.stringify({ step_index, source, type });
+  const jsonl = [line(0, "USER_EXPLICIT", "USER_INPUT"), line(1, "SYSTEM", "CHECKPOINT"),
+    line(2, "MODEL", "PLANNER_RESPONSE"), line(3, "SYSTEM", "CHECKPOINT"), '{"step_index":4,"type":"CHECK'].join("\n");
+  assert.equal(latestAntigravityCheckpoint(jsonl), 3);
+  assert.equal(latestAntigravityCheckpoint(line(0, "USER_EXPLICIT", "USER_INPUT")), undefined);
+  assert.equal(latestAntigravityCheckpoint(""), undefined);
 });
 
 test("normalizeInput maps conversationId and sets no prompt event id", () => {

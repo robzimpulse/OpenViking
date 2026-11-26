@@ -262,7 +262,7 @@ When each integration injects it:
 | Kimi Code | The first prompt; retried on later prompts until it succeeds |
 | CodeBuddy Code | `SessionStart`, every source; it can be delivered twice in one session, so the hook is idempotent. CodeBuddy drops `SessionStart` context at a compaction, so the next prompt sends it again |
 | Qoder CLI | `SessionStart`, every source (`startup`, `resume`, `compact`) |
-| Google Antigravity | `SessionStart`, systemMessage (`{ systemMessage: { systemMessage: "<text>" } }`); shows as a "System Message" row |
+| Google Antigravity | `SessionStart`, systemMessage (`{ systemMessage: { systemMessage: "<text>" } }`); shows as a "System Message" row. Sent again as a systemMessage on the first turn after each compaction checkpoint in the transcript |
 | OpenCode | The first message of each session and the first after each compaction; not retried after a failure, and skipped for subagent sessions. The list of indexed repositories also goes into the system prompt |
 | DSH | At session start, and again on the next model step when a compaction dropped it |
 | pi | In the system prompt, rebuilt every turn |
@@ -447,7 +447,7 @@ When the host shortens its context, most integrations make sure the dropped mess
 | Cursor | Host summarizes | `preCompact` commits | Nothing |
 | CodeBuddy Code | Host summarizes | `PreCompact` commits | The next prompt sends the profile again |
 | Qoder CLI | Host summarizes | `PreCompact` commits | Nothing |
-| Google Antigravity | Host summarizes | No pre-compaction event | Nothing |
+| Google Antigravity | Host summarizes | No pre-compaction event | The first turn after the compaction checkpoint sends the profile again |
 | TRAE, TRAE CN, ZCode | Host summarizes | No pre-compaction event | Nothing |
 | Kimi Code | Host summarizes | `PreCompact` commits | Nothing |
 | OpenCode | Host summarizes | v1 flushes and commits; v2 captures the transcript | v1 commits again on `session.compacted`; v2 commits after `session.compaction.ended`. The next message sends the session-start context again |

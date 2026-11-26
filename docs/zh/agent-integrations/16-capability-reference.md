@@ -260,7 +260,7 @@ skill 走单独的路径。创建、安装或替换 skill 用 MCP `add_skill` �
 | Kimi Code | 首次提问时；失败后在后续提问中重试，直到成功 |
 | CodeBuddy Code | `SessionStart`，所有 source；同一会话内可能投递两次，因此 hook 是幂等的。CodeBuddy 压缩时会丢掉 `SessionStart` 上下文，因此下一次提问重新发送 |
 | Qoder CLI | `SessionStart`，所有 source（`startup`、`resume`、`compact`） |
-| Google Antigravity | `SessionStart`，systemMessage（`{ systemMessage: { systemMessage: "<text>" } }`）；显示为“System Message”行 |
+| Google Antigravity | `SessionStart`，systemMessage（`{ systemMessage: { systemMessage: "<text>" } }`）；显示为“System Message”行。transcript 中每个压缩检查点之后的第一轮以 systemMessage 重新发送 |
 | OpenCode | 每个会话的第一条消息，以及每次压缩后的第一条消息；失败后不重试，子代理会话跳过。已索引仓库的列表同时进入 system prompt |
 | DSH | 会话开始时；压缩去掉它之后，在下一个模型步骤重新发送 |
 | pi | 放在 system prompt 中，每轮重建 |
@@ -445,7 +445,7 @@ Claude Code 和 Codex 默认 `auto`，其他集成默认 `off`。支持服务端
 | Cursor | 宿主摘要 | `preCompact` 提交 | 无 |
 | CodeBuddy Code | 宿主摘要 | `PreCompact` 提交 | 下一次提问重新发送 profile |
 | Qoder CLI | 宿主摘要 | `PreCompact` 提交 | 无 |
-| Google Antigravity | 宿主摘要 | 没有压缩前事件 | 无 |
+| Google Antigravity | 宿主摘要 | 没有压缩前事件 | 压缩检查点之后的第一轮重新发送 profile |
 | TRAE、TRAE CN、ZCode | 宿主摘要 | 没有压缩前事件 | 无 |
 | Kimi Code | 宿主摘要 | `PreCompact` 提交 | 无 |
 | OpenCode | 宿主摘要 | v1 刷新并提交；v2 捕获 transcript | v1 在 `session.compacted` 时再提交一次；v2 在 `session.compaction.ended` 后提交。下一条消息重新发送会话开始上下文 |

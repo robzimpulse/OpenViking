@@ -7,11 +7,18 @@
  * 2. Ephemeral messages: an `ephemeralMessage` survives across model invocations within a single turn,
  *    but does not survive into later turns. Therefore recall is injected once per turn at `invocationNum === 0`.
  *    A nested `systemMessage` at SessionStart persists across turns.
+ * 3. Compaction: the host has no compaction hook. Each compaction writes a `CHECKPOINT` step to the
+ *    transcript and drops the context before it, the SessionStart profile included. prompt() reports
+ *    the latest checkpoint as `input.latestCompaction`; the dispatcher then sends the profile again
+ *    on that turn, and envelope() puts it in a lasting `systemMessage` step.
  *
  * Purpose: Provides lifecycle stage mappings, input normalization, once-per-turn prompt recall,
- * URI guard allow/deny decisions, and transcript capture + commit on Stop for Google Antigravity.
+ * URI guard allow/deny decisions, profile re-send after compaction, and transcript capture +
+ * commit on Stop for Google Antigravity.
  * Usage: Loaded by hook dispatcher (`hook.mjs`) and uri-guard (`uri-guard.mjs`) via HOSTS.antigravity.
  */
+
+import { readFileSync } from "node:fs";
 
 import { addAgentMessages, commitAgentSession } from "../../memory-plugin-shared/lib/agent-hook-runtime.mjs";
 import { evaluateUriGuard } from "../../memory-plugin-shared/lib/uri-guard.mjs";
@@ -19,11 +26,19 @@ import {
   applyIncrementalCaptureResult,
   buildIncrementalCapturePlan,
 } from "./incremental-turn-capture.mjs";
-import { buildAntigravityTurns, cleanAntigravityText } from "./antigravity-turns.mjs";
+import {
+  buildAntigravityTurns,
+  cleanAntigravityText,
+  resolveAntigravityTranscriptPath,
+} from "./antigravity-turns.mjs";
+
+const PROFILE_BLOCK = /<openviking-context source="session-start">[\s\S]*?<\/openviking-context>/;
 
 /**
  * Build host response envelope for injected context.
- * SessionStart injects nested systemMessage; PreInvocation injects ephemeralMessage.
+ * SessionStart injects a nested systemMessage. PreInvocation injects recall as an ephemeralMessage;
+ * a profile re-sent after a compaction goes first, as its own systemMessage, so it stays in later turns.
+ * Usage: `envelope("pre-invocation", block)` → `{ injectSteps: [...] }`, or `{}` for an empty block.
  */
 export function envelope(event, block) {
   if (!block) return {};
@@ -31,9 +46,31 @@ export function envelope(event, block) {
     return { injectSteps: [{ systemMessage: { systemMessage: block } }] };
   }
   if (event === "pre-invocation") {
-    return { injectSteps: [{ ephemeralMessage: block }] };
+    const profile = block.match(PROFILE_BLOCK)?.[0];
+    const rest = profile ? block.replace(profile, "").trim() : block;
+    const steps = [];
+    if (profile) steps.push({ systemMessage: { systemMessage: profile } });
+    if (rest) steps.push({ ephemeralMessage: rest });
+    return { injectSteps: steps };
   }
   return {};
+}
+
+/**
+ * Step index of the latest compaction `CHECKPOINT` step in transcript JSONL text.
+ * Usage: `latestAntigravityCheckpoint(jsonl)` → a step index, or undefined when there is none.
+ * A partial last line is skipped.
+ */
+export function latestAntigravityCheckpoint(jsonl) {
+  let latest;
+  for (const line of String(jsonl || "").split("\n")) {
+    if (!line.includes('"CHECKPOINT"')) continue;
+    try {
+      const step = JSON.parse(line);
+      if (step.type === "CHECKPOINT" && step.source === "SYSTEM") latest = step.step_index;
+    } catch { /* a partial last line */ }
+  }
+  return latest;
 }
 
 /**
@@ -56,12 +93,21 @@ export function normalizeInput(input = {}) {
  * Extract prompt text for recall.
  * Returns empty string for invocationNum > 0 (ephemeral already visible in turn)
  * or when lastUserInput is missing.
+ * Also sets `input.latestCompaction` from the transcript (left unset when there is no checkpoint
+ * or no readable transcript), which the dispatcher compares with the last one it answered.
  */
 export function prompt(input = {}) {
   const invocationNum = input.invocationNum ?? input.invocation_num ?? 0;
   if (Number(invocationNum) > 0) return "";
   const raw = input.lastUserInput ?? input.last_user_input;
   if (typeof raw !== "string" || !raw.trim()) return "";
+  const transcriptPath = resolveAntigravityTranscriptPath(input);
+  if (transcriptPath) {
+    try {
+      const latest = latestAntigravityCheckpoint(readFileSync(transcriptPath, "utf8"));
+      if (latest !== undefined) input.latestCompaction = latest;
+    } catch { /* no readable transcript: no compaction is reported */ }
+  }
   return cleanAntigravityText(raw.trim());
 }
 
