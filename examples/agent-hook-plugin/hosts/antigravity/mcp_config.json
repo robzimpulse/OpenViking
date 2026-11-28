@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "openviking": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/agent-integrations/antigravity/servers/mcp-proxy.mjs"
+      ],
+      "env": {
+        "OPENVIKING_HOOK_SOURCE": "antigravity"
+      }
+    }
+  }
+}
