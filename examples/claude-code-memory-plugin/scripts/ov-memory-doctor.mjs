@@ -68,6 +68,21 @@ function envBoolValue(name) {
   return undefined;
 }
 
+/**
+ * Hook commands in a parsed hooks.json that name ${CLAUDE_PLUGIN_ROOT} without
+ * double quotes around it. The shell splits such a path at the first space, so
+ * they fail whenever the plugin root holds whitespace (Claude desktop app:
+ * "~/Library/Application Support/..."). Usage: `unquotedRootHookCommands(json)`
+ * → array of offending command strings (empty when none, or json is invalid).
+ */
+export function unquotedRootHookCommands(hooksJson) {
+  const commands = Object.values(hooksJson?.hooks || {}).flat()
+    .flatMap((entry) => (Array.isArray(entry?.hooks) ? entry.hooks : []))
+    .map((hook) => hook?.command)
+    .filter((command) => typeof command === "string");
+  return commands.filter((command) => /(?<!")\$\{CLAUDE_PLUGIN_ROOT\}/u.test(command));
+}
+
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
@@ -120,6 +135,18 @@ function checkInstall(report, { cliOnPath }) {
     const extra = ids.filter((id) => id !== PLUGIN_ID);
     if (extra.length) {
       report.warn("additional openviking plugin ids are installed", extra.join(", "), `claude plugin uninstall <id> for each stale copy (legacy marketplace ${LEGACY_MARKETPLACE})`);
+    }
+  }
+
+  // Hook commands vs. whitespace in the plugin root (volcengine/OpenViking#7761):
+  // config, connection and MCP all look healthy while every hook dies with
+  // "Cannot find module", so name it here.
+  for (const root of new Set([PLUGIN_ROOT, installPath ? resolvePath(installPath) : ""].filter(Boolean))) {
+    if (!/\s/u.test(root)) continue;
+    const unquoted = unquotedRootHookCommands(tryJson(join(root, "hooks", "hooks.json")));
+    if (unquoted.length) {
+      report.fail("hook commands leave a plugin root with spaces unquoted — every hook fails with \"Cannot find module\"",
+        `${homeShort(root)}\n${unquoted.join("\n")}`, "update the plugin to a version whose hooks.json quotes \"${CLAUDE_PLUGIN_ROOT}/…\"");
     }
   }
 

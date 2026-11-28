@@ -111,6 +111,20 @@ test("Claude hook commands run from plugin roots containing spaces", {
   }
 });
 
+/**
+ * Every other place that hands ${CLAUDE_PLUGIN_ROOT} to a shell (the /ov slash
+ * command and the doctor skill's command and allowed-tools rule) must quote it
+ * too; .mcp.json is exempt because it passes the path as an argv element.
+ */
+test("Claude shell commands quote ${CLAUDE_PLUGIN_ROOT}", () => {
+  const files = ["hooks/hooks.json", "commands/ov.md", "skills/ov-memory-doctor/SKILL.md"];
+  for (const rel of files) {
+    const text = readFileSync(join(pluginDir, rel), "utf-8");
+    const unquoted = text.match(/(?<!")(?<!\\")\$\{CLAUDE_PLUGIN_ROOT\}[^\s"]*/gu) || [];
+    assert.deepEqual(unquoted, [], `${rel} has unquoted plugin-root paths`);
+  }
+});
+
 test("Claude hooks include optional skill experience PostToolUse Read hook", () => {
   const hooks = readJson(join(pluginDir, "hooks", "hooks.json"));
   const postToolUse = hooks.hooks?.PostToolUse;
@@ -140,8 +154,17 @@ test("Claude hooks include PreToolUse URI guard for file and shell tools", () =>
 test("Claude plugin ships the memory doctor skill and script", () => {
   const skill = join(pluginDir, "skills", "ov-memory-doctor", "SKILL.md");
   assert.ok(existsSync(skill), "missing skills/ov-memory-doctor/SKILL.md");
-  assert.match(readFileSync(skill, "utf-8"), /node \$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/ov-memory-doctor\.mjs/);
+  assert.match(readFileSync(skill, "utf-8"), /node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/ov-memory-doctor\.mjs"/);
   assert.ok(existsSync(join(pluginDir, "skills", "ov-memory-doctor", "reference.md")));
   execFileSync("node", ["--check", join(pluginDir, "scripts", "ov-memory-doctor.mjs")], { stdio: "pipe" });
   execFileSync("node", ["--check", join(pluginDir, "scripts", "shared", "doctor-core.mjs")], { stdio: "pipe" });
+});
+
+/** The doctor names the #7761 failure instead of reporting a healthy install. */
+test("doctor flags hook commands that leave the plugin root unquoted", async () => {
+  const { unquotedRootHookCommands } = await import("./ov-memory-doctor.mjs");
+  const legacy = { hooks: { Stop: [{ hooks: [{ command: "node ${CLAUDE_PLUGIN_ROOT}/scripts/auto-capture.mjs" }] }] } };
+  assert.deepEqual(unquotedRootHookCommands(legacy), ["node ${CLAUDE_PLUGIN_ROOT}/scripts/auto-capture.mjs"]);
+  assert.deepEqual(unquotedRootHookCommands(readJson(join(pluginDir, "hooks", "hooks.json"))), []);
+  assert.deepEqual(unquotedRootHookCommands(null), []);
 });

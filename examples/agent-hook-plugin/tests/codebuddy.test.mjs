@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -77,5 +79,21 @@ test("plugin.codebuddy.* overrides apply and plugin.workbuddy.* does not", async
     assert.equal(cfg.recallLimit, 7);
   } finally {
     await rmSync(files.dir, { recursive: true, force: true });
+  }
+});
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * CodeBuddy substitutes ${CODEBUDDY_PLUGIN_ROOT} into the command text before the
+ * shell runs it, so a plugin root with spaces splits the script path unless the
+ * template quotes it (same bug class as volcengine/OpenViking#7761).
+ */
+test("CodeBuddy hook commands quote the plugin root", () => {
+  const { hooks } = JSON.parse(readFileSync(join(ROOT, "hosts", "codebuddy", "hooks.json"), "utf-8"));
+  const commands = Object.values(hooks).flat().flatMap((entry) => entry.hooks).map((hook) => hook.command);
+  assert.ok(commands.length > 0);
+  for (const command of commands) {
+    assert.match(command, /^node "\$\{CODEBUDDY_PLUGIN_ROOT\}\/[^"\s]+\.mjs"( |$)/u, command);
   }
 });
